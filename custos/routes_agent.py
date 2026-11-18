@@ -273,6 +273,9 @@ async def get_one(
         await _audit_denial(request, key, "get", name, denial)
         raise denial
     _etag(response, result["revision"])
+    from custos.telemetry import annotate_span
+
+    annotate_span(key.actor_id, "get", name)
     await record_audit(
         request.app.state.session_maker,
         actor_kind="agent", actor_id=key.key_id, actor_label=key.actor_label,

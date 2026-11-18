@@ -240,6 +240,9 @@ def build_mcp_server(app: Starlette) -> MCPServer:
 
     async def _audit(key: AgentPrincipal, action: str, item_name: str | None,
                      ok: bool, detail: dict[str, Any]) -> None:
+        from custos.telemetry import annotate_span
+
+        annotate_span(key.actor_id, action, item_name)
         await record_audit(
             state.session_maker, actor_kind="agent", actor_id=key.actor_id,
             actor_label=key.actor_label, action=action, item_name=item_name,

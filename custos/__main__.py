@@ -37,12 +37,15 @@ class _TraceFormatter(logging.Formatter):
 
 
 def main() -> None:
-    settings = load_settings()
-    app = create_app(settings)
     handler = logging.StreamHandler()
     handler.setFormatter(_TraceFormatter("%(levelname)s %(name)s: %(message)s"))
     logging.getLogger().addHandler(handler)
-    logging.getLogger().setLevel(logging.INFO)
+    # application logs at INFO; root stays WARNING so third-party INFO
+    # (sqlalchemy bind params, httpx request lines) never reaches the log
+    # surface (§11). uvicorn's own loggers keep their dictConfig levels.
+    logging.getLogger("custos").setLevel(logging.INFO)
+    settings = load_settings()
+    app = create_app(settings)  # installs the record-factory sanitizer
     logging.getLogger("uvicorn.access").addFilter(_QueryRedactingAccessFilter())
     uvicorn.run(
         app,

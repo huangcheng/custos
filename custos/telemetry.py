@@ -49,8 +49,10 @@ def install_telemetry() -> TracerProvider:
             record = old_factory(*args, **kwargs)
             span = trace.get_current_span()
             ctx = span.get_span_context()
-            record.trace_id = format(ctx.trace_id, "032x") if ctx.trace_id else ""
-            record.span_id = format(ctx.span_id, "016x") if ctx.span_id else ""
+            trace_id = format(ctx.trace_id, "032x") if ctx.trace_id else ""
+            span_id = format(ctx.span_id, "016x") if ctx.span_id else ""
+            record.trace_id = trace_id
+            record.span_id = span_id
             return record
 
         logging.setLogRecordFactory(_factory)
@@ -79,6 +81,18 @@ def _redact_request_span(span: object, scope: object) -> None:
                 span.set_attribute(key, value.split("?", 1)[0])  # type: ignore[attr-defined]
         except Exception:
             logger.warning("span attribute %s could not be redacted", key)
+
+
+def annotate_span(actor: str, action: str, item_name: str | None = None) -> None:
+    """§3: spans carry actor/action/item-name — never values or tokens."""
+    span = trace.get_current_span()
+    try:
+        span.set_attribute("custos.actor", actor)
+        span.set_attribute("custos.action", action)
+        if item_name is not None:
+            span.set_attribute("custos.item", item_name)
+    except Exception:
+        logger.debug("span annotation skipped")
 
 
 def instrument_fastapi(app: object) -> None:

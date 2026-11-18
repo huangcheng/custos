@@ -28,6 +28,7 @@ cleanup() {
 trap cleanup EXIT
 
 fail() { E2E_FAILED=1; echo "E2E FAIL: $1 (artifacts: $RUN_DIR; E2E_KEEP=1 keeps the stack)" >&2; exit 1; }
+trap 'E2E_FAILED=1' ERR
 
 echo "== generate throwaway secrets"
 python3 - "$RUN_DIR" <<'PYEOF'
@@ -102,9 +103,9 @@ check(ok.status_code == 200 and ok.headers["etag"] == '"2"', "if-match positive"
 
 # out-of-scope read AND write -> 404 identical to missing
 a = c.get("/api/items/e2e-item", headers=scoped)
-b = c.get("/api/items/never-existed", headers=scoped)
+b = c.get("/api/items/never-existed", headers=rw)  # genuine missing-item baseline
 w = c.put("/api/items/e2e-item", headers=scoped, json={"notes": "", "fields": []})
-m = c.put("/api/items/never-existed", headers=scoped, json={"notes": "", "fields": []})
+m = c.put("/api/items/never-existed", headers=rw, json={"notes": "", "fields": []})
 check(a.status_code == b.status_code == w.status_code == m.status_code == 404, "scope 404s")
 check(a.content == b.content == w.content == m.content, "byte-identical 404 bodies")
 

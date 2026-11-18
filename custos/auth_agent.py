@@ -84,6 +84,9 @@ async def agent_principal(request: Request) -> AsyncIterator[AgentPrincipal]:
         raise AppError("unauthorized", "authentication failed")
 
     principal = as_principal(key)
+    from custos.telemetry import annotate_span
+
+    annotate_span(principal.actor_id, "agent_request")
     limiter.check_agent_request(principal.key_id)
     limiter.acquire_agent_slot(principal.key_id)
     try:
