@@ -244,7 +244,7 @@ def test_file_forms_and_mode_check(tmp_path: Path) -> None:
         }
     )
     assert s.keyring_raw == FAKE_KEYRING
-    assert s.pepper_raw == FAKE_PEPPER.encode()
+    assert s.pepper_raw == bytes([7]) * 32
     # both set -> error
     with pytest.raises(ConfigError):
         load_settings(env(CUSTOS_SECRETS_KEY_FILE=str(key_file)))
@@ -331,3 +331,14 @@ def test_missing_secret_file_message(tmp_path: Path) -> None:
                 "CUSTOS_PEPPER": FAKE_PEPPER,
             }
         )
+
+
+def test_config_validates_keyring_and_pepper_content() -> None:
+    with pytest.raises(ConfigError):
+        load_settings(env(CUSTOS_SECRETS_KEY="k1:not-base64url!!"))
+    with pytest.raises(ConfigError):
+        load_settings(env(CUSTOS_SECRETS_KEY=f"k1:{FAKE_KEYRING.split(':')[1]},k1:{FAKE_KEYRING.split(':')[1]}"))
+    # all-zero pepper rejected at startup
+    zero_pepper = base64.urlsafe_b64encode(bytes(32)).rstrip(b"=").decode()
+    with pytest.raises(ConfigError):
+        load_settings(env(CUSTOS_PEPPER=zero_pepper))

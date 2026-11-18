@@ -15,6 +15,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from custos.crypto import CryptoError, parse_keyring, parse_pepper
+
 Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 
@@ -200,6 +202,11 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     pepper_text = _paired(env, "CUSTOS_PEPPER")
     if pepper_text is None:
         raise ConfigError("CUSTOS_PEPPER (or _FILE) is required")
+    try:
+        parse_keyring(keyring_raw)
+        pepper_bytes = parse_pepper(pepper_text)
+    except CryptoError as exc:
+        raise ConfigError(str(exc)) from exc
 
     return Settings(
         bind=bind,
@@ -214,5 +221,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         allow_missing_key_version=_flag(env, "CUSTOS_ALLOW_MISSING_KEY_VERSION"),
         trusted_proxies=trusted_proxies,
         keyring_raw=keyring_raw,
-        pepper_raw=pepper_text.encode(),
+        pepper_raw=pepper_bytes,
     )
