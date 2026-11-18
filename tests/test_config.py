@@ -342,3 +342,14 @@ def test_config_validates_keyring_and_pepper_content() -> None:
     zero_pepper = base64.urlsafe_b64encode(bytes(32)).rstrip(b"=").decode()
     with pytest.raises(ConfigError):
         load_settings(env(CUSTOS_PEPPER=zero_pepper))
+
+
+def test_bare_postgresql_dsn_normalized() -> None:
+    s = load_settings(
+        {
+            "CUSTOS_DATABASE_URL": "postgresql://custos:cu-test@127.0.0.1:5432/custos",
+            "CUSTOS_SECRETS_KEY": FAKE_KEYRING,
+            "CUSTOS_PEPPER": FAKE_PEPPER,
+        }
+    )
+    assert s.database_url.startswith("postgresql+asyncpg://")

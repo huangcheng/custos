@@ -196,6 +196,10 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     database_url = _paired(env, "CUSTOS_DATABASE_URL")
     if database_url is None:
         raise ConfigError("CUSTOS_DATABASE_URL (or _FILE) is required")
+    if database_url.startswith("postgresql://"):
+        database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if not database_url.startswith("postgresql+asyncpg://"):
+        raise ConfigError("CUSTOS_DATABASE_URL must be a postgresql+asyncpg:// DSN")
     keyring_raw = _paired(env, "CUSTOS_SECRETS_KEY")
     if keyring_raw is None:
         raise ConfigError("CUSTOS_SECRETS_KEY (or _FILE) is required")
