@@ -1,0 +1,22 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Dependency layer first: source edits do not reinstall the environment.
+COPY pyproject.toml uv.lock ./
+RUN pip install --no-cache-dir uv==0.11.28 \
+    && uv sync --frozen --no-dev --no-install-project --no-cache \
+    && useradd --system --uid 10001 --create-home custos \
+    && install -d -m 0700 -o custos -g custos /var/lib/custos
+
+COPY custos ./custos
+COPY alembic.ini ./
+COPY alembic ./alembic
+RUN uv sync --frozen --no-dev --no-cache
+
+ENV HOME=/home/custos PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:$PATH"
+USER custos
+EXPOSE 8300
+HEALTHCHECK --interval=10s --timeout=3s --retries=6 --start-period=120s \
+    CMD /app/.venv/bin/python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8300/healthz', timeout=2)"
+CMD ["/app/.venv/bin/python", "-m", "custos"]

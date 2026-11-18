@@ -68,3 +68,6 @@ packages/*/dist/
 *.rej
 .vscode/
 .idea/
+
+# Local dev environment (generated config, secrets, logs)
+/dev/
