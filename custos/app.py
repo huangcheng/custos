@@ -9,6 +9,7 @@ import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from sqlalchemy import text
@@ -17,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from custos.audit import FailureCounter, LedgerBudget
 from custos.config import Settings
+from custos.crypto import Vault, parse_keyring
 from custos.db.session import get_session, make_engine, make_session_maker
 from custos.errors import install_error_handlers
 from custos.ratelimit import RateLimiter
@@ -89,6 +91,30 @@ async def _run_migrations(settings: Settings) -> None:
         raise RuntimeError("alembic upgrade head failed (see server stderr)")
 
 
+class _NoStoreMiddleware:
+    """Cache-Control: no-store + Vary on /api/* and /mcp (design §3)."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "http" and (
+            scope["path"].startswith("/api/")
+            or scope["path"] == "/mcp"
+            or scope["path"].startswith("/mcp/")
+        ):
+            async def _send(message: Any) -> None:
+                if message["type"] == "http.response.start":
+                    headers = message.setdefault("headers", [])
+                    headers.append((b"cache-control", b"no-store"))
+                    headers.append((b"vary", b"Cookie, Authorization"))
+                await send(message)
+
+            await self.app(scope, receive, _send)
+        else:
+            await self.app(scope, receive, send)
+
+
 def create_app(settings: Settings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -106,6 +132,7 @@ def create_app(settings: Settings) -> FastAPI:
         app.state.rate_limiter = RateLimiter()
         app.state.ledger_budget = LedgerBudget()
         app.state.failure_counter = FailureCounter()
+        app.state.vault = Vault(parse_keyring(settings.keyring_raw))
         try:
             yield
         finally:
@@ -116,6 +143,14 @@ def create_app(settings: Settings) -> FastAPI:
     )
     app.state.settings = settings
     install_error_handlers(app)
+
+    from custos.routes_agent import router as agent_router
+
+    app.include_router(agent_router)
+
+    # Pure ASGI middleware: BaseHTTPMiddleware breaks SSE disconnect
+    # propagation for the /mcp mount (Task 8).
+    app.add_middleware(_NoStoreMiddleware)
 
     async def _get_session() -> AsyncIterator[AsyncSession]:
         async with app.state.session_maker() as session:

@@ -25,6 +25,28 @@ _DUMMY_DIGEST = bytes(32)
 _FAILURE_MESSAGE = "authentication failed"
 
 
+@dataclass(frozen=True, eq=False)
+class AgentPrincipal:
+    """The authenticated agent principal (Principal protocol): identity and
+    authorization only — never the digest or secret."""
+
+    actor_id: str
+    actor_label: str
+    mode: str
+    scopes: tuple[str, ...]
+    actor_kind: str = "agent"
+
+    @property
+    def key_id(self) -> str:
+        return self.actor_id
+
+
+def as_principal(row: AgentKey) -> AgentPrincipal:
+    return AgentPrincipal(
+        actor_id=row.key_id, actor_label=row.label, mode=row.mode, scopes=tuple(row.scopes)
+    )
+
+
 class AgentAuthError(Exception):
     """Uniform agent authentication failure — one identical 401 shape."""
 

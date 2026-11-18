@@ -20,14 +20,14 @@ from fastapi import Request
 from custos.audit import LedgerError, record_audit, record_auth_event
 from custos.db.models import AgentKey
 from custos.errors import AppError
-from custos.keys import AgentAuthError, verify_agent_key
+from custos.keys import AgentAuthError, AgentPrincipal, as_principal, verify_agent_key
 
 
 def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-async def agent_principal(request: Request) -> AsyncIterator[AgentKey]:
+async def agent_principal(request: Request) -> AsyncIterator[AgentPrincipal]:
     app = request.app
     limiter = app.state.rate_limiter
     ip = _client_ip(request)
@@ -77,9 +77,10 @@ async def agent_principal(request: Request) -> AsyncIterator[AgentKey]:
             raise AppError("internal_error", "ledger unavailable") from None
         raise AppError("unauthorized", "authentication failed")
 
-    limiter.check_agent_request(key.key_id)
-    limiter.acquire_agent_slot(key.key_id)
+    principal = as_principal(key)
+    limiter.check_agent_request(principal.key_id)
+    limiter.acquire_agent_slot(principal.key_id)
     try:
-        yield key
+        yield principal
     finally:
-        limiter.release_agent_slot(key.key_id)
+        limiter.release_agent_slot(principal.key_id)

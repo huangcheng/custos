@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -60,11 +61,17 @@ class _Ceiling:
 
 
 class Principal(Protocol):
-    actor_id: str
-    actor_label: str
-    mode: str
-    scopes: list[str]
-    actor_kind: str  # "agent" | "operator_session" | "operator_token" | "local_process"
+    @property
+    def actor_id(self) -> str: ...
+    @property
+    def actor_label(self) -> str: ...
+    @property
+    def mode(self) -> str: ...
+    @property
+    def scopes(self) -> Sequence[str]: ...
+    @property
+    def actor_kind(self) -> str: ...
+    # "agent" | "operator_session" | "operator_token" | "local_process"
 
 
 def _not_found() -> AppError:

@@ -6,8 +6,9 @@ no ``/``). Empty scopes = no access (fail closed).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from fnmatch import fnmatchcase
 
 
-def scope_allows(scopes: list[str], name: str) -> bool:
+def scope_allows(scopes: Sequence[str], name: str) -> bool:
     return any(fnmatchcase(name, pattern) for pattern in scopes)
