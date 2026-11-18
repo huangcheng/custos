@@ -126,15 +126,24 @@ def create_app(settings: Settings) -> FastAPI:
                 await engine.dispose()
         else:
             await _run_migrations(settings)
+        from custos.telemetry import instrument_engine
+
         engine = make_engine(settings)
+        instrument_engine(engine.sync_engine)
         app.state.engine = engine
         app.state.session_maker = make_session_maker(engine)
         app.state.rate_limiter = RateLimiter()
         app.state.ledger_budget = LedgerBudget()
         app.state.failure_counter = FailureCounter()
         app.state.vault = Vault(parse_keyring(settings.keyring_raw))
+        from custos.mcp_surface import mount_mcp
+
+        mcp_sub, mcp_gate = mount_mcp(app)
+        app.state.mcp_sub = mcp_gate
         try:
-            yield
+            # the MCP session manager runs inside the sub-app's lifespan
+            async with mcp_sub.router.lifespan_context(mcp_sub):
+                yield
         finally:
             await engine.dispose()
 
@@ -143,10 +152,33 @@ def create_app(settings: Settings) -> FastAPI:
     )
     app.state.settings = settings
     install_error_handlers(app)
+    from custos.telemetry import install_telemetry, instrument_fastapi
+
+    install_telemetry()
+    instrument_fastapi(app)  # before any add_middleware / first request
 
     from custos.routes_agent import router as agent_router
 
     app.include_router(agent_router)
+
+    class _MCPDispatch:
+        """Route /mcp to the Streamable HTTP sub-app (auth middleware intact)."""
+
+        def __init__(self, app: Any) -> None:
+            self.app = app
+
+        async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+            path = scope.get("path", "")
+            if scope["type"] in ("http", "websocket") and (
+                path == "/mcp" or path.startswith("/mcp/")
+            ):
+                sub = getattr(scope["app"].state, "mcp_sub", None)  # gate-wrapped
+                if sub is not None:
+                    await sub(scope, receive, send)
+                    return
+            await self.app(scope, receive, send)
+
+    app.add_middleware(_MCPDispatch)
 
     # Pure ASGI middleware: BaseHTTPMiddleware breaks SSE disconnect
     # propagation for the /mcp mount (Task 8).

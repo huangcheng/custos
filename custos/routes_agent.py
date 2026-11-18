@@ -104,21 +104,22 @@ def _list_row(item: Item, fields: list[tuple[str, bool]]) -> dict[str, Any]:
     }
 
 
-async def _paged_items(
-    request: Request,
+async def list_via_engine(
+    state: Any,
     key: AgentPrincipal,
     endpoint: str,
-    search: str | None = None,
+    cursor: str | None = None,
+    limit: int = 50,
+    q: str | None = None,
 ) -> dict[str, Any]:
-    app = request.app
-    session_maker = app.state.session_maker
-    pepper = app.state.settings.pepper_raw
-    params = request.query_params
-    limit = _page_limit(params.get("limit"))
-    after = params.get("cursor")
+    """Shared by REST list/search and the MCP tools — one implementation."""
+    session_maker = state.session_maker
+    pepper = state.settings.pepper_raw
+    limit = _page_limit(str(limit))
+    search = q
     cursor_payload: dict[str, Any] = {}
-    if after is not None:
-        cursor_payload = read_cursor(after, pepper, endpoint, key.key_id)
+    if cursor is not None:
+        cursor_payload = read_cursor(cursor, pepper, endpoint, key.key_id)
     async with session_maker() as session:
         # scan narrow columns only: notes/blobs never loaded for scope checks
         stmt = select(Item.id, Item.name).where(Item.deleted_at.is_(None)).order_by(Item.name)
@@ -208,7 +209,11 @@ async def _paged_items(
 async def list_items(
     request: Request, key: AgentPrincipal = Depends(agent_principal)
 ) -> dict[str, Any]:
-    result = await _paged_items(request, key, "list")
+    result = await list_via_engine(
+        request.app.state, key, "list",
+        cursor=request.query_params.get("cursor"),
+        limit=_page_limit(request.query_params.get("limit")),
+    )
     await record_audit(
         request.app.state.session_maker,
         actor_kind="agent", actor_id=key.key_id, actor_label=key.actor_label,
@@ -227,7 +232,12 @@ async def search_items(
         raise AppError("invalid", "q is required")
     if len(q) > 256:
         raise AppError("invalid", "q too long")
-    result = await _paged_items(request, key, "search", search=q)
+    result = await list_via_engine(
+        request.app.state, key, "search",
+        cursor=request.query_params.get("cursor"),
+        limit=_page_limit(request.query_params.get("limit")),
+        q=q,
+    )
     # audit detail carries the result count only — never q (§6)
     await record_audit(
         request.app.state.session_maker,
