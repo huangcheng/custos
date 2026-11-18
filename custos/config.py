@@ -136,6 +136,12 @@ def _parse_proxies(raw: str | None) -> tuple[Network, ...]:
             raise ConfigError("CUSTOS_TRUSTED_PROXIES contains a malformed CIDR") from exc
         if net.prefixlen == 0:
             raise ConfigError("CUSTOS_TRUSTED_PROXIES rejects /0 networks")
+        if isinstance(net, ipaddress.IPv6Network):
+            base = ipaddress.ip_address(net.network_address)
+            if isinstance(base, ipaddress.IPv6Address) and base.ipv4_mapped is not None:
+                raise ConfigError(
+                    "CUSTOS_TRUSTED_PROXIES: use plain IPv4 CIDRs, not IPv4-mapped IPv6"
+                )
         networks.append(net)
     if not networks:
         raise ConfigError("CUSTOS_TRUSTED_PROXIES is set but empty")

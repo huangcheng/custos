@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import sys
@@ -42,6 +43,35 @@ def _head_revisions() -> set[str]:
         if down:
             parents.update(re.findall(r"['\"]([^'\"]+)['\"]", down.group(1)))
     return revisions - parents
+
+
+async def _assert_key_versions(engine: AsyncEngine, settings: Settings) -> None:
+    """§4: referenced key_version scan (metadata only, no decryption).
+    Missing versions refuse startup unless the explicit degraded flag."""
+    available = set(parse_keyring(settings.keyring_raw))
+    referenced: set[int] = set()
+    from sqlalchemy import select
+
+    from custos.db.models import Field, FieldHistory, OperatorAccount
+
+    async with engine.connect() as conn:
+        for column in (Field.key_version, FieldHistory.key_version,
+                       OperatorAccount.totp_key_version):
+            rows = await conn.execute(
+                select(column).distinct().where(column.is_not(None))
+            )
+            referenced.update(r[0] for r in rows)
+    missing = referenced - available
+    if missing:
+        if not settings.allow_missing_key_version:
+            raise RuntimeError(
+                f"key version(s) {sorted(missing)} referenced but absent from the keyring; "
+                "restore them or set CUSTOS_ALLOW_MISSING_KEY_VERSION=1 for degraded mode"
+            )
+        logging.getLogger("custos").warning(
+            "degraded mode: key version(s) %s missing; affected reads/writes fail closed",
+            sorted(missing),
+        )
 
 
 async def _assert_schema_head(engine: AsyncEngine) -> None:
@@ -129,6 +159,11 @@ def create_app(settings: Settings) -> FastAPI:
         from custos.telemetry import instrument_engine
 
         engine = make_engine(settings)
+        try:
+            await _assert_key_versions(engine, settings)
+        except Exception:
+            await engine.dispose()
+            raise
         instrument_engine(engine.sync_engine)
         app.state.engine = engine
         app.state.session_maker = make_session_maker(engine)

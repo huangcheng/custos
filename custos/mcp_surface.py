@@ -24,7 +24,7 @@ from custos.envexport import env_lines
 from custos.errors import AppError
 from custos.items import get_item, patch_item, put_item, soft_delete
 from custos.keys import AgentAuthError, AgentPrincipal, verify_agent_key
-from custos.limits import FieldView
+from custos.limits import FieldView, valid_item_name
 
 logger = logging.getLogger("custos.mcp")
 
@@ -92,8 +92,15 @@ class MCPRequestGate:
             await self.sub(scope, receive, send)
             return
         state = self.state
+        from custos.clientip import resolve_client_ip
+
         client = scope.get("client")
-        ip = client[0] if client else "unknown"
+        peer_ip = client[0] if client else "unknown"
+        xff = ", ".join(
+            v.decode(errors="replace") for k, v in scope.get("headers", [])
+            if k.lower() == b"x-forwarded-for"
+        ) or None
+        ip = resolve_client_ip(peer_ip, xff, state.settings.trusted_proxies)
         limiter = state.rate_limiter
         if scope.get("method") == "POST":
             declared = next(
@@ -162,7 +169,7 @@ class MCPRequestGate:
                 try:
                     await record_auth_event(
                         state.session_maker, kind="agent_auth", ok=False, ip=ip,
-                        peer_ip=ip, budget=state.ledger_budget,
+                        peer_ip=peer_ip, budget=state.ledger_budget,
                         counter=state.failure_counter,
                     )
                     await record_audit(
@@ -265,7 +272,7 @@ def build_mcp_server(app: Starlette) -> MCPServer:
                             state.session_maker, actor_kind="agent",
                             actor_id=key.actor_id, actor_label=key.actor_label,
                             action=_DENIAL_ACTIONS.get(fn.__name__, "get"),
-                            item_name=str(name)[:200] if name else None, ok=False,
+                            item_name=valid_item_name(name), ok=False,
                             detail={"reason": exc.code},
                             budget=state.ledger_budget, counter=state.failure_counter,
                         )
@@ -274,6 +281,11 @@ def build_mcp_server(app: Starlette) -> MCPServer:
                             AppError("internal_error", "ledger unavailable")
                         ) from None
                 raise _tool_error(exc) from None
+            except Exception:
+                # never let exception text (may carry bound values) reach the
+                # client or the SDK's error surface
+                logger.exception("tool failed")  # sanitized by the log filter
+                raise _tool_error(AppError("internal_error", "internal error")) from None
 
         return wrapper  # type: ignore[return-value]
 

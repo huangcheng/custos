@@ -572,3 +572,33 @@ async def test_operator_principal_write_audited_with_session_kind(env) -> None:
             .all()
         )
         assert rows and all(r.actor_kind == "operator_session" for r in rows)
+
+
+async def test_out_of_scope_readonly_create_gets_404(env) -> None:
+    maker, vault, p = env
+    p.mode = "read"
+    p.scopes = ["other-*"]
+    async with maker() as s:
+        with pytest.raises(AppError) as e:
+            await create_item(s, maker, vault, p, body("scoped-ro"))
+        assert e.value.code == "not_found"  # scope BEFORE mode (§6)
+
+
+async def test_failed_write_leaves_no_success_audit(env) -> None:
+    maker, vault, p = env
+    from custos.db.models import AuditRow
+
+    async with maker() as s:
+        await create_item(s, maker, vault, p, body("audit-tx"))
+        await s.commit()
+    async with maker() as s:
+        with pytest.raises(AppError):
+            await put_item(s, maker, vault, p, "audit-tx", body(), if_match='"99"')
+        await s.rollback()
+    async with maker() as s:
+        rows = (
+            (await s.execute(select(AuditRow).where(
+                AuditRow.item_name == "audit-tx", AuditRow.action == "put")))
+            .scalars().all()
+        )
+        assert rows == []  # rolled-back write must not leave ok:true rows

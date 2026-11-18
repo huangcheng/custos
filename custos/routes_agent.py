@@ -76,7 +76,9 @@ async def _audit_denial(request: Request, key: AgentPrincipal, action: str, name
                         exc: AppError) -> None:
     # out-of-scope probes and mode denials are visible in the ledger (§5);
     # shares the global failure budget; called AFTER the handler session closes.
-    normalized = str(name)[:200] if name is not None else None
+    from custos.limits import valid_item_name
+
+    normalized = valid_item_name(name)
     try:
         await record_audit(
             request.app.state.session_maker,
@@ -174,7 +176,9 @@ async def list_via_engine(
         if visible:
             ids = [i[0] for i in visible]
             for item in (
-                await session.execute(select(Item).where(Item.id.in_(ids)))
+                await session.execute(
+                    select(Item).where(Item.id.in_(ids), Item.deleted_at.is_(None))
+                )
             ).scalars():
                 items_by_id[item.id] = item
             # metadata columns only — never ciphertext/value blobs on list paths
@@ -195,7 +199,9 @@ async def list_via_engine(
         next_cursor = mint_cursor({"after": offset_name}, pepper, endpoint, key.key_id)
     result = {
         "items": [
-            _list_row(items_by_id[i[0]], fields_by_item.get(i[0], [])) for i in visible
+            _list_row(items_by_id[i[0]], fields_by_item.get(i[0], []))
+            for i in visible
+            if i[0] in items_by_id  # soft-deleted between scan and hydrate
         ],
         "next_cursor": next_cursor,
     }

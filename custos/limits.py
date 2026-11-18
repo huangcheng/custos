@@ -43,6 +43,13 @@ class Op:
     value: str | None = None
 
 
+def valid_item_name(name: object) -> str | None:
+    """Canonical item-name check for audit attribution (one source of truth)."""
+    if isinstance(name, str) and _ITEM_NAME_RE.match(name):
+        return name
+    return None
+
+
 def _invalid(message: str) -> AppError:
     return AppError("invalid", message)
 

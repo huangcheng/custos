@@ -6,9 +6,9 @@ bucket first, then one agent_auth event + one auth.failure audit row →
 uniform 401. On success: per-key request bucket + concurrency slot, released
 structurally when the dependency exits.
 
-Client IP here is the direct peer; trusted-proxy XFF walking lands with the
-admin plane (plan 2). Behind a proxy the agent plane shares the proxy IP for
-the failed-auth bucket — conservative (blocks sooner, never later).
+Client IP resolution follows §5 (custos.clientip): forwarded headers are
+honored only from trusted peers, walked right-to-left; both the resolved
+client and the direct peer are ledgered.
 """
 
 from __future__ import annotations
@@ -23,14 +23,20 @@ from custos.errors import AppError
 from custos.keys import AgentAuthError, AgentPrincipal, as_principal, verify_agent_key
 
 
-def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+def _client_ip(request: Request) -> tuple[str, str]:
+    from custos.clientip import resolve_client_ip
+
+    peer = request.client.host if request.client else "unknown"
+    # join ALL field instances: proxies may append separate header lines
+    xff = ", ".join(request.headers.getlist("x-forwarded-for")) or None
+    resolved = resolve_client_ip(peer, xff, request.app.state.settings.trusted_proxies)
+    return resolved, peer
 
 
 async def agent_principal(request: Request) -> AsyncIterator[AgentPrincipal]:
     app = request.app
     limiter = app.state.rate_limiter
-    ip = _client_ip(request)
+    ip, peer_ip = _client_ip(request)
     header = request.headers.get("authorization", "")
     presented = header[7:] if header.lower().startswith("bearer ") else ""
 
@@ -56,7 +62,7 @@ async def agent_principal(request: Request) -> AsyncIterator[AgentPrincipal]:
                 kind="agent_auth",
                 ok=False,
                 ip=ip,
-                peer_ip=ip,
+                peer_ip=peer_ip,
                 budget=app.state.ledger_budget,
                 counter=app.state.failure_counter,
             )

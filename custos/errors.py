@@ -65,24 +65,29 @@ class _TracebackSanitizer(logging.Filter):
 
 
 _SANITIZER = _TracebackSanitizer()
+_SANITIZER_INSTALLED = False
+
+
+def _install_sanitizer() -> None:
+    """Strip exc_info at RECORD CREATION (LogRecordFactory): covers every
+    logger and every handler, including ones configured later (uvicorn
+    dictConfig). Logger/handler filters miss propagated records."""
+    global _SANITIZER_INSTALLED
+    if _SANITIZER_INSTALLED:
+        return
+    old_factory = logging.getLogRecordFactory()
+
+    def _factory(*args: object, **kwargs: object) -> logging.LogRecord:
+        record = old_factory(*args, **kwargs)
+        _SANITIZER.filter(record)
+        return record
+
+    logging.setLogRecordFactory(_factory)
+    _SANITIZER_INSTALLED = True
 
 
 def install_error_handlers(app: FastAPI) -> None:
-    # Logger-level filters miss propagated records; handler-level filters on the
-    # root catch everything that reaches an output. Idempotent across app builds.
-    root = logging.getLogger()
-    if _SANITIZER not in root.filters:
-        root.addFilter(_SANITIZER)
-    for handler in root.handlers:
-        if _SANITIZER not in handler.filters:
-            handler.addFilter(_SANITIZER)
-    for name in ("uvicorn.error", "uvicorn", "fastapi"):
-        logger = logging.getLogger(name)
-        if _SANITIZER not in logger.filters:
-            logger.addFilter(_SANITIZER)
-        for handler in logger.handlers:
-            if _SANITIZER not in handler.filters:
-                handler.addFilter(_SANITIZER)
+    _install_sanitizer()
 
     @app.exception_handler(AppError)
     async def _app_error(request: Request, exc: AppError) -> JSONResponse:

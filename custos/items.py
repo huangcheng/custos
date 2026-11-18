@@ -267,13 +267,18 @@ def _materialize_post(
 
 
 async def _audit_write(
-    maker: async_sessionmaker[AsyncSession],
+    session: AsyncSession,
     p: Principal,
     action: str,
     item: Item,
     pre_revision: int,
     evicted_ids: list[str],
 ) -> None:
+    """Success audits commit WITH the write (a rolled-back write leaves no
+    ok:true row). Failure audits stay independent per §4."""
+    from custos.audit import ACTION_ENUM, ACTOR_KINDS, _validate_actor, _validate_detail
+    from custos.db.models import AuditRow
+
     detail: dict[str, Any] = {
         "pre_revision": pre_revision,
         "revision": item.revision,
@@ -281,15 +286,23 @@ async def _audit_write(
     }
     if evicted_ids:
         detail["evicted_ids"] = evicted_ids[:64]
-    await record_audit(
-        maker,
-        actor_kind=getattr(p, "actor_kind", "agent"),
-        actor_id=p.actor_id,
-        actor_label=p.actor_label,
-        action=action,
-        item_name=item.name,
-        ok=True,
-        detail=detail,
+    if action not in ACTION_ENUM:
+        raise ValueError(f"audit action {action!r} is not in the closed enum")
+    actor_kind = getattr(p, "actor_kind", "agent")
+    if actor_kind not in ACTOR_KINDS:
+        raise ValueError(f"actor kind {actor_kind!r} is not in the closed enum")
+    _validate_actor(actor_kind, p.actor_id)
+    _validate_detail(detail)
+    session.add(
+        AuditRow(
+            actor_kind=actor_kind,
+            actor_id=p.actor_id,
+            actor_label=p.actor_label,
+            action=action,
+            item_name=item.name,
+            ok=True,
+            detail=detail,
+        )
     )
 
 
@@ -310,10 +323,10 @@ async def create_item(
     p: Principal,
     body: dict[str, Any],
 ) -> dict[str, Any]:
-    _check_write_mode(p)  # mode needs no name; runs before body validation
     raw_name = body.get("name")
     if isinstance(raw_name, str):
-        _check_scope(p, raw_name)
+        _check_scope(p, raw_name)  # scope BEFORE mode (§6 check order)
+    _check_write_mode(p)
     name, notes, views = validate_post_body(body)
     existing = await _lock_item(session, name)
     if existing is not None:
@@ -336,7 +349,7 @@ async def create_item(
         session.add(row)  # complete row: the XOR CHECK never sees a partial insert
         supplied[view.name] = {"name": view.name, "secret": view.secret, "value": view.value}
     await session.flush()
-    await _audit_write(maker, p, "create", item, 0, [])
+    await _audit_write(session, p, "create", item, 0, [])
     resp = _response(item, supplied, notes)
     resp["created"] = True
     return resp
@@ -406,7 +419,7 @@ async def put_item(
     item.notes = notes
     item.revision += 1
     await session.flush()
-    await _audit_write(maker, p, "put", item, pre_revision, evicted)
+    await _audit_write(session, p, "put", item, pre_revision, evicted)
     return _response(item, supplied, notes)
 
 
@@ -447,7 +460,7 @@ async def patch_item(
     item.notes = new_notes
     item.revision += 1
     await session.flush()
-    await _audit_write(maker, p, "patch", item, pre_revision, evicted)
+    await _audit_write(session, p, "patch", item, pre_revision, evicted)
     return _response(item, supplied, new_notes)
 
 
@@ -467,7 +480,7 @@ async def soft_delete(
     item.deleted_at = datetime.now(UTC)
     item.revision += 1
     await session.flush()
-    await _audit_write(maker, p, "delete", item, pre_revision, [])
+    await _audit_write(session, p, "delete", item, pre_revision, [])
 
 
 async def force_drop(
