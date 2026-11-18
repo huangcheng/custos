@@ -37,7 +37,7 @@ from custos.scopes import scope_allows
 
 HISTORY_BUDGET = 20
 HISTORY_CEILING = 100_000
-_ETAG_RE = re.compile(r'^"([0-9]+|\*)"\Z')
+_ETAG_RE = re.compile(r'^"([0-9]{1,10}|\*)"\Z')
 
 
 class _Ceiling:
@@ -64,6 +64,7 @@ class Principal(Protocol):
     actor_label: str
     mode: str
     scopes: list[str]
+    actor_kind: str  # "agent" | "operator_session" | "operator_token" | "local_process"
 
 
 def _not_found() -> AppError:
@@ -275,7 +276,7 @@ async def _audit_write(
         detail["evicted_ids"] = evicted_ids[:64]
     await record_audit(
         maker,
-        actor_kind="agent",
+        actor_kind=getattr(p, "actor_kind", "agent"),
         actor_id=p.actor_id,
         actor_label=p.actor_label,
         action=action,
@@ -302,10 +303,10 @@ async def create_item(
     p: Principal,
     body: dict[str, Any],
 ) -> dict[str, Any]:
+    _check_write_mode(p)  # mode needs no name; runs before body validation
     raw_name = body.get("name")
     if isinstance(raw_name, str):
         _check_scope(p, raw_name)
-        _check_write_mode(p)
     name, notes, views = validate_post_body(body)
     existing = await _lock_item(session, name)
     if existing is not None:
@@ -474,7 +475,7 @@ async def force_drop(
     (trial decryption bounded to this item). Keeps readable rows and the item
     row with its deleted_at state. Returns the dropped count. Operator plane
     only (§5/§6): the caller must pass an operator actor kind."""
-    if actor_kind not in ("operator_session", "operator_token", "local_process"):
+    if actor_kind not in ("operator_session", "local_process"):
         raise AppError("session_required", "force-drop is operator-only")
     item = await _lock_item(session, name)
     if item is None:

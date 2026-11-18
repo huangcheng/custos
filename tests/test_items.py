@@ -29,6 +29,7 @@ class Principal:
     actor_label: str = "cu-test"
     mode: str = "read-write"
     scopes: list[str] = field(default_factory=lambda: ["*"])
+    actor_kind: str = "agent"
 
 
 @pytest.fixture
@@ -51,7 +52,10 @@ async def test_create_and_get(env) -> None:
     maker, vault, p = env
     async with maker() as s:
         item = await create_item(
-            s, maker, vault, p,
+            s,
+            maker,
+            vault,
+            p,
             body("engine-aliyun", "note", [{"name": "KEY", "secret": True, "value": "sk-fake"}]),
         )
         await s.commit()
@@ -88,20 +92,33 @@ async def test_put_history_and_keep_placeholder(env) -> None:
     maker, vault, p = env
     async with maker() as s:
         await create_item(
-            s, maker, vault, p,
-            body("put-item", fields=[
-                {"name": "A", "secret": True, "value": "old-secret"},
-                {"name": "B", "secret": False, "value": "old-plain"},
-            ]),
+            s,
+            maker,
+            vault,
+            p,
+            body(
+                "put-item",
+                fields=[
+                    {"name": "A", "secret": True, "value": "old-secret"},
+                    {"name": "B", "secret": False, "value": "old-plain"},
+                ],
+            ),
         )
         await s.commit()
     async with maker() as s:
         resp = await put_item(
-            s, maker, vault, p, "put-item",
-            body(notes="", fields=[
-                {"name": "A", "secret": True},  # keep
-                {"name": "B", "secret": False, "value": "new-plain"},
-            ]),
+            s,
+            maker,
+            vault,
+            p,
+            "put-item",
+            body(
+                notes="",
+                fields=[
+                    {"name": "A", "secret": True},  # keep
+                    {"name": "B", "secret": False, "value": "new-plain"},
+                ],
+            ),
         )
         await s.commit()
     assert {"name": "A", "secret": True, "kept": True} in resp["fields"]
@@ -109,7 +126,8 @@ async def test_put_history_and_keep_placeholder(env) -> None:
         item = (await s.execute(select(Item).where(Item.name == "put-item"))).scalar_one()
         hist = (
             (await s.execute(select(FieldHistory).where(FieldHistory.item_id == item.id)))
-            .scalars().all()
+            .scalars()
+            .all()
         )
         assert [h.name for h in hist] == ["B"]  # only actual change snapshotted
         assert hist[0].value == "old-plain"
@@ -128,7 +146,8 @@ async def test_identical_resend_no_history(env) -> None:
         item = (await s.execute(select(Item).where(Item.name == "noop-item"))).scalar_one()
         hist = (
             (await s.execute(select(FieldHistory).where(FieldHistory.item_id == item.id)))
-            .scalars().all()
+            .scalars()
+            .all()
         )
         assert hist == []
 
@@ -137,14 +156,21 @@ async def test_history_budget_20(env) -> None:
     maker, vault, p = env
     async with maker() as s:
         await create_item(
-            s, maker, vault, p,
+            s,
+            maker,
+            vault,
+            p,
             body("budget-item", fields=[{"name": "K", "secret": False, "value": "v0"}]),
         )
         await s.commit()
     for i in range(1, 22):
         async with maker() as s:
             await put_item(
-                s, maker, vault, p, "budget-item",
+                s,
+                maker,
+                vault,
+                p,
+                "budget-item",
                 body(fields=[{"name": "K", "secret": False, "value": f"v{i}"}]),
             )
             await s.commit()
@@ -152,7 +178,8 @@ async def test_history_budget_20(env) -> None:
         item = (await s.execute(select(Item).where(Item.name == "budget-item"))).scalar_one()
         hist = (
             (await s.execute(select(FieldHistory).where(FieldHistory.item_id == item.id)))
-            .scalars().all()
+            .scalars()
+            .all()
         )
         assert len(hist) == 20
         assert "v0" not in [h.value for h in hist]  # oldest evicted
@@ -184,7 +211,10 @@ async def test_concurrent_puts_serialized(env) -> None:
     maker, vault, p = env
     async with maker() as s:
         await create_item(
-            s, maker, vault, p,
+            s,
+            maker,
+            vault,
+            p,
             body("race-item", fields=[{"name": "K", "secret": False, "value": "v0"}]),
         )
         await s.commit()
@@ -192,7 +222,11 @@ async def test_concurrent_puts_serialized(env) -> None:
     async def writer(value: str) -> None:
         async with maker() as s:
             await put_item(
-                s, maker, vault, p, "race-item",
+                s,
+                maker,
+                vault,
+                p,
+                "race-item",
                 body(fields=[{"name": "K", "secret": False, "value": value}]),
             )
             await s.commit()
@@ -203,7 +237,8 @@ async def test_concurrent_puts_serialized(env) -> None:
         assert item.revision == 3
         hist = (
             (await s.execute(select(FieldHistory).where(FieldHistory.item_id == item.id)))
-            .scalars().all()
+            .scalars()
+            .all()
         )
         assert len(hist) == 2  # both priors snapshotted, none lost
 
@@ -235,30 +270,37 @@ async def test_retype_pair_history_oracle(env) -> None:
     maker, vault, p = env
     async with maker() as s:
         await create_item(
-            s, maker, vault, p,
+            s,
+            maker,
+            vault,
+            p,
             body("retype-item", fields=[{"name": "K", "secret": False, "value": "plain-v"}]),
         )
         await s.commit()
     async with maker() as s:
         await patch_item(
-            s, maker, vault, p, "retype-item",
-            {"fields": [
-                {"name": "K", "value": None},
-                {"name": "K", "secret": True, "value": "plain-v"},
-            ]},
+            s,
+            maker,
+            vault,
+            p,
+            "retype-item",
+            {
+                "fields": [
+                    {"name": "K", "value": None},
+                    {"name": "K", "secret": True, "value": "plain-v"},
+                ]
+            },
         )
         await s.commit()
     async with maker() as s:
         item = (await s.execute(select(Item).where(Item.name == "retype-item"))).scalar_one()
         hist = (
             (await s.execute(select(FieldHistory).where(FieldHistory.item_id == item.id)))
-            .scalars().all()
+            .scalars()
+            .all()
         )
         assert len(hist) == 1 and hist[0].secret is False and hist[0].value == "plain-v"
-        live = (
-            (await s.execute(select(Field).where(Field.item_id == item.id)))
-            .scalars().all()
-        )
+        live = (await s.execute(select(Field).where(Field.item_id == item.id))).scalars().all()
         assert live[0].secret is True
         opened = vault.open("field", str(live[0].id), live[0].ciphertext, live[0].key_version)
         assert opened == b"plain-v"
@@ -268,22 +310,34 @@ async def test_downgrade_atomic(env) -> None:
     maker, vault, p = env
     async with maker() as s:
         await create_item(
-            s, maker, vault, p,
-            body("dg-item", fields=[
-                {"name": "S", "secret": True, "value": "sealed"},
-                {"name": "P", "secret": False, "value": "old"},
-            ]),
+            s,
+            maker,
+            vault,
+            p,
+            body(
+                "dg-item",
+                fields=[
+                    {"name": "S", "secret": True, "value": "sealed"},
+                    {"name": "P", "secret": False, "value": "old"},
+                ],
+            ),
         )
         await s.commit()
     async with maker() as s:
         with pytest.raises(AppError) as dg:
             await patch_item(
-                s, maker, vault, p, "dg-item",
-                {"fields": [
-                    {"name": "P", "secret": False, "value": "new"},
-                    {"name": "S", "value": None},
-                    {"name": "S", "secret": False, "value": "x"},
-                ]},
+                s,
+                maker,
+                vault,
+                p,
+                "dg-item",
+                {
+                    "fields": [
+                        {"name": "P", "secret": False, "value": "new"},
+                        {"name": "S", "value": None},
+                        {"name": "S", "secret": False, "value": "x"},
+                    ]
+                },
             )
         assert dg.value.code == "secret_downgrade_denied"
         await s.rollback()
@@ -297,19 +351,23 @@ async def test_degraded_mode_and_force_drop(env) -> None:
     maker, vault, p = env
     async with maker() as s:
         await create_item(
-            s, maker, vault, p,
-            body("corrupt-item", fields=[
-                {"name": "BAD", "secret": True, "value": "will-corrupt"},
-                {"name": "GOOD", "secret": True, "value": "readable"},
-            ]),
+            s,
+            maker,
+            vault,
+            p,
+            body(
+                "corrupt-item",
+                fields=[
+                    {"name": "BAD", "secret": True, "value": "will-corrupt"},
+                    {"name": "GOOD", "secret": True, "value": "readable"},
+                ],
+            ),
         )
         await s.commit()
     async with maker() as s:
         item = (await s.execute(select(Item).where(Item.name == "corrupt-item"))).scalar_one()
         bad = (
-            await s.execute(
-                select(Field).where(Field.item_id == item.id, Field.name == "BAD")
-            )
+            await s.execute(select(Field).where(Field.item_id == item.id, Field.name == "BAD"))
         ).scalar_one()
         bad.ciphertext = bad.ciphertext[:-1] + bytes([bad.ciphertext[-1] ^ 0xFF])
         await s.commit()
@@ -394,7 +452,11 @@ async def test_upsert_create_validates_put_body(env) -> None:
         with pytest.raises(AppError) as e:
             # notes missing: PUT-shaped body must 422 even on the create branch
             await put_item(
-                s, maker, vault, p, "upsert-bad",
+                s,
+                maker,
+                vault,
+                p,
+                "upsert-bad",
                 {"fields": [{"name": "K", "secret": False, "value": "v"}]},
                 upsert=True,
             )
@@ -405,7 +467,10 @@ async def test_keep_plain_noop_response_has_value(env) -> None:
     maker, vault, p = env
     async with maker() as s:
         await create_item(
-            s, maker, vault, p,
+            s,
+            maker,
+            vault,
+            p,
             body("keep-plain", fields=[{"name": "K", "secret": False, "value": "pv"}]),
         )
         await s.commit()
@@ -421,9 +486,7 @@ async def test_create_gates_before_body_validation(env) -> None:
     p.scopes = ["other-*"]
     async with maker() as s:
         with pytest.raises(AppError) as e:
-            await create_item(
-                s, maker, vault, p, {"name": "some-item", "fields": "not-a-list"}
-            )
+            await create_item(s, maker, vault, p, {"name": "some-item", "fields": "not-a-list"})
         assert e.value.code == "not_found"  # scope gate first, not 422
     ro = Principal(mode="read")
     async with maker() as s:
@@ -436,7 +499,10 @@ async def test_force_drop_bumps_revision(env) -> None:
     maker, vault, p = env
     async with maker() as s:
         await create_item(
-            s, maker, vault, p,
+            s,
+            maker,
+            vault,
+            p,
             body("fd-rev", fields=[{"name": "BAD", "secret": True, "value": "x"}]),
         )
         await s.commit()
@@ -451,3 +517,58 @@ async def test_force_drop_bumps_revision(env) -> None:
     async with maker() as s:
         item = (await s.execute(select(Item).where(Item.name == "fd-rev"))).scalar_one()
         assert item.revision == 2
+
+
+async def test_force_drop_rejects_token_principal(env) -> None:
+    maker, vault, p = env
+    async with maker() as s:
+        await create_item(s, maker, vault, p, body("fd-token"))
+        await s.commit()
+    async with maker() as s:
+        with pytest.raises(AppError) as e:
+            await force_drop(s, maker, vault, p, "fd-token", actor_kind="operator_token")
+        assert e.value.code == "session_required"
+
+
+async def test_read_only_nameless_post_gets_403(env) -> None:
+    maker, vault, p = env
+    ro = Principal(mode="read")
+    async with maker() as s:
+        with pytest.raises(AppError) as e:
+            await create_item(s, maker, vault, ro, {"fields": []})
+        assert e.value.code == "read_only"
+
+
+async def test_giant_if_match_is_422(env) -> None:
+    maker, vault, p = env
+    async with maker() as s:
+        await create_item(s, maker, vault, p, body("etag-giant"))
+        await s.commit()
+    async with maker() as s:
+        with pytest.raises(AppError) as e:
+            await put_item(
+                s, maker, vault, p, "etag-giant", body(), if_match='"' + "9" * 5000 + '"'
+            )
+        assert e.value.code == "invalid"
+        await s.rollback()
+
+
+async def test_operator_principal_write_audited_with_session_kind(env) -> None:
+    maker, vault, _ = env
+    import uuid as _uuid
+
+    from custos.audit import ACTION_ENUM  # noqa: F401
+    from custos.db.models import AuditRow
+
+    op = Principal(actor_id=str(_uuid.uuid4()), actor_label="operator")
+    op.actor_kind = "operator_session"  # type: ignore[attr-defined]
+    async with maker() as s:
+        await create_item(s, maker, vault, op, body("op-write"))
+        await s.commit()
+    async with maker() as s:
+        rows = (
+            (await s.execute(select(AuditRow).where(AuditRow.item_name == "op-write")))
+            .scalars()
+            .all()
+        )
+        assert rows and all(r.actor_kind == "operator_session" for r in rows)
