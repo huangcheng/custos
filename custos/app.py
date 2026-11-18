@@ -15,9 +15,11 @@ from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from custos.audit import FailureCounter, LedgerBudget
 from custos.config import Settings
 from custos.db.session import get_session, make_engine, make_session_maker
 from custos.errors import install_error_handlers
+from custos.ratelimit import RateLimiter
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -101,6 +103,9 @@ def create_app(settings: Settings) -> FastAPI:
         engine = make_engine(settings)
         app.state.engine = engine
         app.state.session_maker = make_session_maker(engine)
+        app.state.rate_limiter = RateLimiter()
+        app.state.ledger_budget = LedgerBudget()
+        app.state.failure_counter = FailureCounter()
         try:
             yield
         finally:
