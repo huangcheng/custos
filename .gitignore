@@ -1,0 +1,70 @@
+# Secrets and generated config — never commit
+.env
+.env.*
+!.env.example
+# per-machine credentials the toolchain reads
+.envrc
+.direnv/
+.npmrc
+*.pem
+*.key
+*.keyring
+*.pepper
+keyring.json
+keyring.txt
+pepper.txt
+custos-keyring*
+custos-pepper*
+/secrets/
+
+# Local audit roster and gate script (contain provider/model details)
+*.local
+scripts/spec-audit.sh
+
+# Local data and sensitive backups (dumps contain cleartext metadata)
+*.db
+*.sqlite*
+*.dump
+*.sql
+*.sql.gz
+*.sql.bz2
+*.backup
+!/deploy/**/*.sql
+!/alembic/**/*.sql
+/pgdata/
+/data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+/dist/
+/build/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Rust
+cli/target/
+
+# Node / dashboard
+node_modules/
+dashboard/dist/
+dashboard/dist-ssr/
+packages/*/dist/
+*.tsbuildinfo
+
+# OS / editor noise
+.DS_Store
+*.swp
+*.swo
+*~
+*.orig
+*.rej
+.vscode/
+.idea/
