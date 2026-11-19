@@ -193,6 +193,27 @@ async def test_non_object_payload_rejected() -> None:
         await _verify(None)
 
 
+async def test_truthy_non_bool_success_rejected() -> None:
+    # Spec §5: success:false rejects — require the literal boolean, not truthiness.
+    for fake in ("true", 1, "yes", [True]):
+        with pytest.raises(AppError):
+            await _verify({"success": fake, "hostname": HOST})
+
+
+async def test_non_2xx_rejected() -> None:
+    for status in (400, 500, 503):
+        with pytest.raises(AppError):
+            await _verify({"success": True, "hostname": HOST}, status=status)
+
+
+async def test_overlong_token_rejected_before_siteverify() -> None:
+    transport = _FakeTransport({"success": True, "hostname": HOST})
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(AppError):
+            await verify_turnstile(_settings(), "x" * 2049, "203.0.113.1", client=client)
+    assert transport.last_request is None  # never sent to Cloudflare
+
+
 async def test_non_string_turnstile_token_422(ts_http) -> None:
     async with ts_http() as (client, maker, app):
         r = await client.post("/api/auth/login", json={

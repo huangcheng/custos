@@ -16,6 +16,7 @@ from custos.errors import AppError
 
 _SITEVERIFY = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 _TIMEOUT = 5.0
+_MAX_TOKEN_LEN = 2048  # Cloudflare's documented widget-token ceiling
 
 
 async def verify_turnstile(
@@ -29,12 +30,17 @@ async def verify_turnstile(
         return  # Turnstile not configured
     if not token:
         raise AppError("turnstile_failed", "turnstile token required")
+    if len(token) > _MAX_TOKEN_LEN:
+        raise AppError("turnstile_failed", "turnstile token invalid")
     data = {"secret": settings.turnstile_secret, "response": token, "remoteip": ip}
     owns_client = client is None
     if client is None:
-        client = httpx.AsyncClient(timeout=_TIMEOUT)
+        # trust_env=False: siteverify must not be routed through proxy env vars
+        client = httpx.AsyncClient(timeout=_TIMEOUT, trust_env=False)
     try:
         resp = await client.post(_SITEVERIFY, data=data, timeout=_TIMEOUT)
+        if resp.status_code != 200:
+            raise ValueError("non-200 siteverify response")
         payload = resp.json()
         if not isinstance(payload, dict):
             raise ValueError("non-object siteverify payload")
@@ -43,7 +49,7 @@ async def verify_turnstile(
     finally:
         if owns_client:
             await client.aclose()
-    if not payload.get("success"):
+    if payload.get("success") is not True:
         raise AppError("turnstile_failed", "turnstile verification failed")
     hostname = payload.get("hostname")
     if not hostname or hostname not in (settings.turnstile_hostnames or ()):

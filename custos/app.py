@@ -184,7 +184,7 @@ def create_app(settings: Settings) -> FastAPI:
         import httpx as _httpx
 
         app.state.turnstile_client = (
-            _httpx.AsyncClient(timeout=5.0) if settings.turnstile_secret else None
+            _httpx.AsyncClient(timeout=5.0, trust_env=False) if settings.turnstile_secret else None
         )
         app.state.vault = Vault(parse_keyring(settings.keyring_raw))
         # provision the setup code at first startup (§5), only while no
