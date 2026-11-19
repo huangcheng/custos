@@ -24,7 +24,10 @@ BASE_ENV = {
 
 
 def env(**extra: str) -> dict[str, str]:
-    return {**BASE_ENV, **extra}
+    combined = {**BASE_ENV, **extra}
+    if combined.get("CUSTOS_PUBLIC_BIND") == "1" and "CUSTOS_ALLOWED_ORIGINS" not in combined:
+        combined["CUSTOS_ALLOWED_ORIGINS"] = "https://console.example"
+    return combined
 
 
 def test_defaults() -> None:
@@ -353,3 +356,28 @@ def test_bare_postgresql_dsn_normalized() -> None:
         }
     )
     assert s.database_url.startswith("postgresql+asyncpg://")
+
+
+def test_allowed_origins_parsed_and_normalized() -> None:
+    s = load_settings(env(CUSTOS_ALLOWED_ORIGINS="https://a.example, https://b.example"))
+    assert s.allowed_origins == ("https://a.example", "https://b.example")
+    # trailing slash normalized away (exact-match check_origin)
+    s2 = load_settings(env(CUSTOS_ALLOWED_ORIGINS="https://c.example/"))
+    assert s2.allowed_origins == ("https://c.example",)
+    assert load_settings(env()).allowed_origins == ()
+
+
+def test_allowed_origins_rejects_bad_scheme() -> None:
+    with pytest.raises(ConfigError):
+        load_settings(env(CUSTOS_ALLOWED_ORIGINS="console.example.com"))  # no scheme
+    with pytest.raises(ConfigError):
+        load_settings(env(CUSTOS_ALLOWED_ORIGINS="ftp://a.example"))
+    with pytest.raises(ConfigError):
+        load_settings(env(CUSTOS_ALLOWED_ORIGINS="   "))  # whitespace-only
+
+
+def test_public_bind_requires_origins() -> None:
+    with pytest.raises(ConfigError):
+        load_settings(env(CUSTOS_BIND="10.0.0.5", CUSTOS_PUBLIC_BIND="1",
+                          CUSTOS_TRUSTED_PROXIES="10.0.0.0/8",
+                          CUSTOS_ALLOWED_ORIGINS=""))  # explicit empty overrides helper

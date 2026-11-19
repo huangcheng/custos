@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import select
 
-from custos.db.models import OperatorAccount
+from custos.db.models import OperatorAccount, OperatorSession
 from custos.errors import AppError
 from custos.operator.account import ensure_setup_code, setup_account
+from custos.operator.sessions import COOKIE_NAME, require_session
 
 router = APIRouter(prefix="/api/auth")
 
@@ -20,12 +21,44 @@ async def status(request: Request) -> dict[str, Any]:
         acct = (
             await session.execute(select(OperatorAccount))
         ).scalar_one_or_none()
-    return {
+    result: dict[str, Any] = {
         "setup_required": acct is None,
         "totp_required": bool(acct is not None and acct.totp_enabled),
         "turnstile_sitekey": request.app.state.settings.turnstile_sitekey,
         "passkey_available": False,
     }
+    cookie = request.cookies.get(COOKIE_NAME)
+    if cookie and not request.headers.get("authorization"):
+        from custos.operator.sessions import resolve_session
+
+        async with request.app.state.session_maker() as session:
+            try:
+                sess = await resolve_session(session, cookie)
+                result["csrf_token"] = sess.csrf_token
+            except AppError:
+                pass  # dead cookie: status stays public
+            await session.commit()
+    return result
+
+
+@router.post("/logout")
+async def logout(
+    request: Request, response: Response,
+    sess: OperatorSession = Depends(require_session),
+) -> dict[str, Any]:
+    from custos.audit import record_audit
+    from custos.operator.sessions import clear_session_cookie, revoke_session
+
+    async with request.app.state.session_maker() as session:
+        await revoke_session(session, sess.id)
+        await session.commit()
+    await record_audit(
+        request.app.state.session_maker, actor_kind="operator_session",
+        actor_id=str(sess.id), actor_label="operator", action="operator.logout",
+        item_name=None, ok=True, detail={},
+    )
+    clear_session_cookie(response)
+    return {"logout": "complete"}
 
 
 @router.post("/setup")

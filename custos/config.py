@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import socket
 import stat
 from collections.abc import Mapping
@@ -42,6 +43,7 @@ class Settings:
     trusted_proxies: tuple[Network, ...] = ()
     keyring_raw: str = field(default="", repr=False)
     pepper_raw: bytes = field(default=b"", repr=False)
+    allowed_origins: tuple[str, ...] = ()
     setup_code: str | None = field(default=None, repr=False)
     operator_password: str | None = field(default=None, repr=False)
     turnstile_sitekey: str | None = None
@@ -128,6 +130,32 @@ def _bind_is_loopback(bind: str) -> bool:
     return _is_loopback_literal(bind)
 
 
+def _parse_origins(raw: str | None) -> tuple[str, ...]:
+    """Parse + normalize browser origins for exact-match comparison.
+
+    Rejects scheme-less hosts, non-http(s) schemes, paths and whitespace-only
+    values at startup — a typo must fail loudly, not silently 403 every
+    cookie mutation.
+    """
+    if raw is None:
+        return ()
+    origins: list[str] = []
+    for part in raw.split(","):
+        entry = part.strip()
+        if not entry:
+            raise ConfigError("CUSTOS_ALLOWED_ORIGINS contains an empty entry")
+        match = re.fullmatch(r"(https?://[^/\s]+)/?", entry)
+        if match is None:
+            raise ConfigError(
+                "CUSTOS_ALLOWED_ORIGINS entries must be scheme://host[:port] "
+                "without a path (e.g. https://console.example)"
+            )
+        origins.append(match.group(1).rstrip("/"))
+    if not origins:
+        raise ConfigError("CUSTOS_ALLOWED_ORIGINS is set but empty")
+    return tuple(origins)
+
+
 def _parse_proxies(raw: str | None) -> tuple[Network, ...]:
     if raw is None:
         return ()
@@ -193,9 +221,15 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     if insecure_dev:
         insecure_cookie = True
 
+    allowed_origins = _parse_origins(_get(env, "CUSTOS_ALLOWED_ORIGINS"))
     trusted_proxies = _parse_proxies(_get(env, "CUSTOS_TRUSTED_PROXIES"))
     if public_bind and not trusted_proxies:
         raise ConfigError("CUSTOS_PUBLIC_BIND=1 requires non-empty CUSTOS_TRUSTED_PROXIES")
+    if public_bind and not allowed_origins:
+        raise ConfigError(
+            "CUSTOS_PUBLIC_BIND=1 requires CUSTOS_ALLOWED_ORIGINS (browser mutations "
+            "always send an Origin header)"
+        )
 
     retention_raw = _get(env, "CUSTOS_RETENTION_DAYS")
     try:
@@ -243,6 +277,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         skip_migrate=_flag(env, "CUSTOS_SKIP_MIGRATE"),
         allow_missing_key_version=_flag(env, "CUSTOS_ALLOW_MISSING_KEY_VERSION"),
         trusted_proxies=trusted_proxies,
+        allowed_origins=allowed_origins,
         keyring_raw=keyring_raw,
         pepper_raw=pepper_bytes,
         setup_code=setup_code,
