@@ -29,7 +29,12 @@ async def env(pg_db: str):
     async with maker() as s:
         acct = (await s.execute(select(OperatorAccount))).scalar_one_or_none()
         if acct is None:
-            s.add(OperatorAccount(id=1, username="operator", password_hash="cu-test-hash"))
+            acct = OperatorAccount(id=1, username="operator", password_hash="cu-test-hash")
+            s.add(acct)
+            await s.flush()
+        acct.totp_last_step_confirm = 0
+        acct.totp_last_step_login = 0
+        acct.totp_last_step_stepup = 0
         from sqlalchemy import delete
 
         from custos.db.models import AuthEvent
@@ -191,12 +196,19 @@ def totp_http(pg_db: str):
 
 async def test_totp_enable_confirm_disable_routes(totp_http) -> None:
     async with totp_http() as (client, maker, csrf, app):
-        h = {"x-csrf-token": csrf}
-        r = await client.post("/api/auth/totp/setup", headers=h)
+        # mint a step-up token (TOTP currently disabled -> password only)
+        su = await client.post("/api/auth/step-up", headers={"x-csrf-token": csrf},
+                               json={"password": "cu-test-password-12ch"})
+        step = su.json()["step_up_token"]
+        h = {"x-csrf-token": csrf, "x-step-up-token": step}
+        r = await client.post("/api/auth/totp/setup", headers=h, json={})
         assert r.status_code == 200
         secret = r.json()["secret"]
         code = pyotp.TOTP(secret).now()
-        r2 = await client.post("/api/auth/totp/confirm", headers=h, json={"code": code})
+        su2 = await client.post("/api/auth/step-up", headers={"x-csrf-token": csrf},
+                                json={"password": "cu-test-password-12ch"})
+        h_confirm = {"x-csrf-token": csrf, "x-step-up-token": su2.json()["step_up_token"]}
+        r2 = await client.post("/api/auth/totp/confirm", headers=h_confirm, json={"code": code})
         assert r2.status_code == 200
         # status now reports totp_required
         st = await client.get("/api/auth/status")
@@ -209,9 +221,13 @@ async def test_totp_enable_confirm_disable_routes(totp_http) -> None:
             "username": "operator", "password": "cu-test-password-12ch",
             "totp": pyotp.TOTP(secret).now()})
         assert good.status_code == 200
-        # use the NEW session's csrf (the TOTP login minted a fresh session)
-        h2 = {"x-csrf-token": good.json()["csrf_token"]}
-        r3 = await client.post("/api/auth/totp/disable", headers=h2)
+        # use the NEW session's csrf + a step-up with the TOTP factor
+        csrf2 = good.json()["csrf_token"]
+        su3 = await client.post("/api/auth/step-up", headers={"x-csrf-token": csrf2},
+                                json={"password": "cu-test-password-12ch",
+                                      "totp": pyotp.TOTP(secret).now()})
+        h2 = {"x-csrf-token": csrf2, "x-step-up-token": su3.json()["step_up_token"]}
+        r3 = await client.post("/api/auth/totp/disable", headers=h2, json={})
         assert r3.status_code == 200
 
 
@@ -221,7 +237,7 @@ async def test_totp_routes_require_session(totp_http) -> None:
         anon = __import__("httpx").AsyncClient(
             transport=__import__("httpx").ASGITransport(app=app), base_url="http://test")
         async with anon:
-            r = await anon.post("/api/auth/totp/setup")
+            r = await anon.post("/api/auth/totp/setup", json={})
             assert r.status_code == 401
 
 

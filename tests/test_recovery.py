@@ -190,7 +190,8 @@ def rec_http(pg_db: str):
             acct.totp_enabled = True  # force recovery path
             from sqlalchemy import delete
 
-            from custos.db.models import AuthEvent
+            from custos.db.models import AuthEvent, StepUpToken
+            await s.execute(delete(StepUpToken))  # before sessions (FK)
             await s.execute(delete(AuthEvent))
             await s.execute(delete(RecoveryCode))
             await s.execute(delete(OperatorSession))
@@ -256,8 +257,11 @@ async def test_full_session_password_change_sets_new_cookie(rec_http) -> None:
                               json={"username": "operator", "password": PW})
         csrf = r.json()["csrf_token"]
         old_cookie = client.cookies.get("custos_session")
+        su = await client.post("/api/auth/step-up", headers={"x-csrf-token": csrf},
+                               json={"password": PW})
         r2 = await client.post("/api/auth/password-change",
-                               headers={"x-csrf-token": csrf},
+                               headers={"x-csrf-token": csrf,
+                                        "x-step-up-token": su.json()["step_up_token"]},
                                json={"current_password": PW,
                                      "new_password": "cu-test-new-password-12ch"})
         assert r2.status_code == 200

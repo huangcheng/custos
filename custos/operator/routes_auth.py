@@ -11,6 +11,10 @@ from custos.db.models import OperatorAccount, OperatorSession
 from custos.errors import AppError
 from custos.operator.account import ensure_setup_code, setup_account
 from custos.operator.sessions import COOKIE_NAME, require_session
+from custos.operator.stepup import require_step_up
+
+_STEP_UP_TOTP = Depends(require_step_up("totp"))
+_STEP_UP_RECOVERY = Depends(require_step_up("recovery"))
 
 router = APIRouter(prefix="/api/auth")
 
@@ -71,6 +75,61 @@ async def _totp_audit(request: Request, sess: OperatorSession, reason: str) -> N
     )
 
 
+@router.post("/step-up")
+async def step_up_route(
+    request: Request, sess: OperatorSession = Depends(require_session)
+) -> dict[str, Any]:
+    from custos.operator.login import resolve_client
+    from custos.operator.stepup import mint_step_up
+    from custos.routes_agent import _json_body
+
+    body = await _json_body(request)
+    password = body.get("password")
+    if not isinstance(password, str):
+        raise AppError("invalid", "password is required")
+    totp = body.get("totp")
+    recovery_code = body.get("recovery_code")
+    for name, val in (("totp", totp), ("recovery_code", recovery_code)):
+        if val is not None and not isinstance(val, str):
+            raise AppError("invalid", f"{name} must be a string")
+    if totp is not None and recovery_code is not None:
+        raise AppError("invalid", "supply at most one second factor")
+    try:
+        password.encode("utf-8")
+        for val in (totp, recovery_code):
+            if val is not None:
+                val.encode("utf-8")
+    except UnicodeEncodeError:
+        raise AppError("invalid", "inputs must be valid UTF-8") from None
+    settings = request.app.state.settings
+    ip, peer = resolve_client(request, settings)
+    from custos.operator.lockout import check_lockout
+
+    async with request.app.state.session_maker() as session:
+        await check_lockout(session, ip=ip, account_exists=True,
+                            counter=request.app.state.failure_counter)
+        row = await session.get(OperatorSession, sess.id)
+        token = await mint_step_up(
+            session, request.app.state.session_maker, row, password=password,
+            vault=request.app.state.vault, totp=totp, recovery_code=recovery_code,
+            pepper=settings.pepper_raw, ip=ip, peer_ip=peer,
+            budget=request.app.state.ledger_budget,
+            counter=request.app.state.failure_counter,
+            semaphore=request.app.state.auth_semaphore,
+            executor=request.app.state.auth_executor,
+            wait_cap=getattr(request.app.state, "auth_wait_cap", 10.0),
+        )
+        await session.commit()
+    from custos.audit import record_audit
+
+    await record_audit(
+        request.app.state.session_maker, actor_kind="operator_session",
+        actor_id=str(sess.id), actor_label="operator", action="operator.step_up",
+        item_name=None, ok=True, detail={},
+    )
+    return {"step_up_token": token}
+
+
 @router.post("/password-change")
 async def password_change_route(
     request: Request, response: Response,
@@ -78,7 +137,19 @@ async def password_change_route(
 ) -> dict[str, Any]:
     from custos.operator.recovery import change_password
     from custos.operator.sessions import set_session_cookie
+    from custos.operator.stepup import consume_step_up
     from custos.routes_agent import _json_body
+
+    # full sessions require a step-up token; recovery_reset is waived (it
+    # re-verifies current_password in the body, §5)
+    if sess.purpose != "recovery_reset":
+        token = request.headers.get("x-step-up-token", "")
+        if not token:
+            raise AppError("step_up_required", "step-up required")
+        async with request.app.state.session_maker() as session:
+            presenter = await session.get(OperatorSession, sess.id)
+            await consume_step_up(session, token, presenter)
+            await session.commit()
 
     body = await _json_body(request)
     current = body.get("current_password")
@@ -131,7 +202,7 @@ async def password_change_route(
 
 @router.post("/recovery/regen")
 async def recovery_regen(
-    request: Request, sess: OperatorSession = Depends(require_session)
+    request: Request, sess: OperatorSession = _STEP_UP_RECOVERY
 ) -> dict[str, Any]:
     from custos.operator.recovery import issue_codes
 
@@ -151,7 +222,7 @@ async def recovery_regen(
 
 @router.post("/totp/setup")
 async def totp_setup(
-    request: Request, sess: OperatorSession = Depends(require_session)
+    request: Request, sess: OperatorSession = _STEP_UP_TOTP
 ) -> dict[str, Any]:
     from custos.operator.totp import begin_totp_setup
 
@@ -164,7 +235,7 @@ async def totp_setup(
 
 @router.post("/totp/confirm")
 async def totp_confirm(
-    request: Request, sess: OperatorSession = Depends(require_session)
+    request: Request, sess: OperatorSession = _STEP_UP_TOTP
 ) -> dict[str, Any]:
     from custos.operator.totp import confirm_totp
     from custos.routes_agent import _json_body
@@ -182,7 +253,7 @@ async def totp_confirm(
 
 @router.post("/totp/disable")
 async def totp_disable(
-    request: Request, sess: OperatorSession = Depends(require_session)
+    request: Request, sess: OperatorSession = _STEP_UP_TOTP
 ) -> dict[str, Any]:
     from custos.operator.totp import disable_totp
 
