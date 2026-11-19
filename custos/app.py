@@ -171,6 +171,24 @@ def create_app(settings: Settings) -> FastAPI:
         app.state.ledger_budget = LedgerBudget()
         app.state.failure_counter = FailureCounter()
         app.state.vault = Vault(parse_keyring(settings.keyring_raw))
+        # provision the setup code at first startup (§5), only while no
+        # account exists — never recreate a consumed code
+        from sqlalchemy import select as _select
+
+        from custos.db.models import OperatorAccount as _Acct
+        from custos.operator.account import ensure_setup_code as _ensure
+
+        async with app.state.session_maker() as _s:
+            _acct = (await _s.execute(_select(_Acct))).scalar_one_or_none()
+        app.state.setup_code = None
+        if _acct is None:
+            try:
+                app.state.setup_code = _ensure(settings)
+            except OSError as exc:
+                # setup routes surface the error; the agent plane still starts
+                logging.getLogger("custos").warning(
+                    "setup-code provisioning deferred; data dir unusable: %s", exc
+                )
         from custos.mcp_surface import mount_mcp
 
         mcp_sub, mcp_gate = mount_mcp(app)
@@ -192,9 +210,11 @@ def create_app(settings: Settings) -> FastAPI:
     install_telemetry()
     instrument_fastapi(app)  # before any add_middleware / first request
 
+    from custos.operator.routes_auth import router as auth_router
     from custos.routes_agent import router as agent_router
 
     app.include_router(agent_router)
+    app.include_router(auth_router)
 
     class _MCPDispatch:
         """Route /mcp to the Streamable HTTP sub-app (auth middleware intact)."""

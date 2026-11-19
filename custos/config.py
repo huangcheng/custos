@@ -20,6 +20,9 @@ from custos.crypto import CryptoError, parse_keyring, parse_pepper
 Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 
+MIN_PASSWORD_LEN = 12  # single source of truth (§5 password policy)
+
+
 class ConfigError(Exception):
     """Startup configuration failure. Messages never contain secret material."""
 
@@ -39,6 +42,9 @@ class Settings:
     trusted_proxies: tuple[Network, ...] = ()
     keyring_raw: str = field(default="", repr=False)
     pepper_raw: bytes = field(default=b"", repr=False)
+    setup_code: str | None = field(default=None, repr=False)
+    operator_password: str | None = field(default=None, repr=False)
+    turnstile_sitekey: str | None = None
 
 
 def _get(env: Mapping[str, str], name: str) -> str | None:
@@ -218,6 +224,13 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     except CryptoError as exc:
         raise ConfigError(str(exc)) from exc
 
+    setup_code = _get(env, "CUSTOS_SETUP_CODE")
+    if setup_code is not None and len(setup_code) < 22:
+        raise ConfigError("CUSTOS_SETUP_CODE must be at least 22 chars (128 bits)")
+    operator_password = _paired(env, "CUSTOS_OPERATOR_PASSWORD")
+    if operator_password is not None and len(operator_password) < MIN_PASSWORD_LEN:
+        raise ConfigError("CUSTOS_OPERATOR_PASSWORD must be at least 12 characters")
+
     return Settings(
         bind=bind,
         port=port,
@@ -232,4 +245,6 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         trusted_proxies=trusted_proxies,
         keyring_raw=keyring_raw,
         pepper_raw=pepper_bytes,
+        setup_code=setup_code,
+        operator_password=operator_password,
     )

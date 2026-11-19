@@ -1,0 +1,97 @@
+"""Operator auth routes (design §5/§6). Grows task by task."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Request
+from sqlalchemy import select
+
+from custos.db.models import OperatorAccount
+from custos.errors import AppError
+from custos.operator.account import ensure_setup_code, setup_account
+
+router = APIRouter(prefix="/api/auth")
+
+
+@router.get("/status")
+async def status(request: Request) -> dict[str, Any]:
+    async with request.app.state.session_maker() as session:
+        acct = (
+            await session.execute(select(OperatorAccount))
+        ).scalar_one_or_none()
+    return {
+        "setup_required": acct is None,
+        "totp_required": bool(acct is not None and acct.totp_enabled),
+        "turnstile_sitekey": request.app.state.settings.turnstile_sitekey,
+        "passkey_available": False,
+    }
+
+
+@router.post("/setup")
+async def setup(request: Request) -> dict[str, Any]:
+    from custos.routes_agent import _json_body
+
+    settings = request.app.state.settings
+    body = await _json_body(request)
+    username = body.get("username")
+    setup_code = body.get("setup_code")
+    if not isinstance(username, str) or not isinstance(setup_code, str):
+        raise AppError("invalid", "username and setup_code are required")
+    body_password = body.get("password")
+    env_password = settings.operator_password
+    if body_password is not None and env_password is not None:
+        raise AppError("invalid", "password given both in body and environment")
+    password = body_password if body_password is not None else env_password
+    if not isinstance(password, str):
+        raise AppError("invalid", "password is required")
+    from custos.clientip import resolve_client_ip
+
+    peer = request.client.host if request.client else "unknown"
+    xff = ", ".join(request.headers.getlist("x-forwarded-for")) or None
+    ip = resolve_client_ip(peer, xff, settings.trusted_proxies)
+    async with request.app.state.session_maker() as session:
+        # single-shot guard BEFORE any filesystem provisioning: post-setup
+        # requests must never recreate the consumed code file
+        existing = (
+            await session.execute(select(OperatorAccount))
+        ).scalar_one_or_none()
+        if existing is not None:
+            from custos.audit import record_audit
+
+            await record_audit(
+                request.app.state.session_maker, actor_kind="anonymous",
+                actor_id=None, actor_label="anonymous", action="operator.setup",
+                item_name=None, ok=False, detail={"reason": "setup_complete"},
+                budget=request.app.state.ledger_budget,
+                counter=request.app.state.failure_counter,
+            )
+            raise AppError("setup_complete", "setup already completed")
+        try:
+            expected = request.app.state.setup_code or ensure_setup_code(settings)
+        except OSError:
+            raise AppError("internal_error", "setup provisioning unavailable") from None
+        session.info["data_dir"] = str(settings.data_dir)
+        await setup_account(
+            session, request.app.state.session_maker,
+            username=username, password=password, setup_code=setup_code,
+            expected_code=expected, ip=ip, peer_ip=peer,
+            budget=request.app.state.ledger_budget,
+            counter=request.app.state.failure_counter,
+        )
+        await session.commit()
+    # durable now: consume the code and record success
+    request.app.state.setup_code = None
+    from pathlib import Path
+
+    from custos.audit import record_audit
+
+    code_path = Path(settings.data_dir) / "setup-code"
+    if code_path.exists():
+        code_path.unlink()
+    await record_audit(
+        request.app.state.session_maker, actor_kind="anonymous", actor_id=None,
+        actor_label="anonymous", action="operator.setup", item_name=None,
+        ok=True, detail={},
+    )
+    return {"setup": "complete"}

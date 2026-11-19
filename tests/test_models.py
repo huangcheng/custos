@@ -87,10 +87,18 @@ async def test_operator_account_single_row(session_maker) -> None:
     async with session_maker() as session:
         session.add(OperatorAccount(username="operator", password_hash="cu-test-hash"))
         await session.commit()
-    async with session_maker() as session:
-        session.add(OperatorAccount(id=2, username="second", password_hash="cu-test-hash"))
-        with pytest.raises(IntegrityError):
-            await session.commit()
+    try:
+        async with session_maker() as session:
+            session.add(OperatorAccount(id=2, username="second", password_hash="cu-test-hash"))
+            with pytest.raises(IntegrityError):
+                await session.commit()
+    finally:
+        # shared session DB: leave no account behind for operator-auth tests
+        async with session_maker() as session:
+            row = (await session.execute(select(OperatorAccount))).scalar_one_or_none()
+            if row is not None:
+                await session.delete(row)
+                await session.commit()
 
 
 async def test_step_up_exactly_one_principal(session_maker) -> None:
