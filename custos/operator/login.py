@@ -63,6 +63,8 @@ async def login(
     totp: str | None,
     recovery_code: str | None,
     factor_hook: FactorHook | None,
+    vault: Any,
+    recovery_hook: Any,
     ip: str,
     peer_ip: str,
     budget: LedgerBudget | None,
@@ -109,6 +111,7 @@ async def login(
     ctx = {
         "totp": totp, "recovery_code": recovery_code,
         "ip": ip, "peer_ip": peer_ip, "budget": budget, "counter": counter,
+        "vault": vault, "recovery_hook": recovery_hook,
     }
     if factor_hook is not None:
         failed_stage = await factor_hook(session, maker, acct, ctx)
@@ -129,6 +132,33 @@ async def login(
 
 # A valid pinned-parameter PHC string (obviously fake input) so the
 # unknown-user path performs the same argon2 work as a real verify.
+async def default_factor_hook(
+    session: AsyncSession,
+    maker: async_sessionmaker[AsyncSession],
+    acct: OperatorAccount,
+    ctx: dict[str, Any],
+) -> str | None:
+    """Login second factor (§5): TOTP when enabled; recovery code alternative
+    (Task 6 attaches). A code supplied while TOTP is disabled is ignored."""
+    totp_code = ctx.get("totp")
+    recovery_code = ctx.get("recovery_code")
+    if acct.totp_enabled:
+        if recovery_code is not None:
+            hook = ctx.get("recovery_hook")
+            if hook is not None and await hook(session, maker, recovery_code, ctx):
+                return None
+            return "login_recovery"
+        if totp_code is None:
+            return "login_totp"
+        from custos.operator.totp import verify_totp
+
+        vault = ctx["vault"]
+        if await verify_totp(session, vault, totp_code, site="login"):
+            return None
+        return "login_totp"
+    return None
+
+
 _DUMMY_HASH = (
     "$argon2id$v=19$m=65536,t=3,p=4$"
     "Y3fAXLnSnuBcZRM9mzloVw$5SvDvzPF2uFOWH3wcZIG4+TiA+xz6jw603HhuZn7KEE"

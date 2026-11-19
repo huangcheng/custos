@@ -61,6 +61,60 @@ async def logout(
     return {"logout": "complete"}
 
 
+async def _totp_audit(request: Request, sess: OperatorSession, reason: str) -> None:
+    from custos.audit import record_audit
+
+    await record_audit(
+        request.app.state.session_maker, actor_kind="operator_session",
+        actor_id=str(sess.id), actor_label="operator", action="operator.totp_change",
+        item_name=None, ok=True, detail={"reason": reason},
+    )
+
+
+@router.post("/totp/setup")
+async def totp_setup(
+    request: Request, sess: OperatorSession = Depends(require_session)
+) -> dict[str, Any]:
+    from custos.operator.totp import begin_totp_setup
+
+    async with request.app.state.session_maker() as session:
+        secret, uri = await begin_totp_setup(session, request.app.state.vault)
+        await session.commit()
+    await _totp_audit(request, sess, "enable")
+    return {"secret": secret, "provisioning_uri": uri}
+
+
+@router.post("/totp/confirm")
+async def totp_confirm(
+    request: Request, sess: OperatorSession = Depends(require_session)
+) -> dict[str, Any]:
+    from custos.operator.totp import confirm_totp
+    from custos.routes_agent import _json_body
+
+    body = await _json_body(request)
+    code = body.get("code")
+    if not isinstance(code, str):
+        raise AppError("invalid", "code is required")
+    async with request.app.state.session_maker() as session:
+        await confirm_totp(session, request.app.state.vault, code)
+        await session.commit()
+    await _totp_audit(request, sess, "confirm")
+    return {"totp": "enabled"}
+
+
+@router.post("/totp/disable")
+async def totp_disable(
+    request: Request, sess: OperatorSession = Depends(require_session)
+) -> dict[str, Any]:
+    from custos.operator.totp import disable_totp
+
+    async with request.app.state.session_maker() as session:
+        await disable_totp(session)
+        await session.commit()
+    await _totp_audit(request, sess, "disable")
+    return {"totp": "disabled"}
+
+
 @router.post("/login")
 async def login_route(request: Request, response: Response) -> dict[str, Any]:
     from custos.operator.login import login, resolve_client
@@ -101,6 +155,8 @@ async def login_route(request: Request, response: Response) -> dict[str, Any]:
             wait_cap=getattr(request.app.state, "auth_wait_cap", 10.0),
             username=username, password=password, totp=totp,
             recovery_code=recovery_code, factor_hook=factor_hook,
+            vault=request.app.state.vault,
+            recovery_hook=request.app.state.recovery_hook,
             ip=ip, peer_ip=peer, budget=request.app.state.ledger_budget,
             counter=request.app.state.failure_counter,
         )
