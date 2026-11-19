@@ -64,7 +64,7 @@ async def login(
     recovery_code: str | None,
     factor_hook: FactorHook | None,
     vault: Any,
-    recovery_hook: Any,
+    pepper: bytes,
     ip: str,
     peer_ip: str,
     budget: LedgerBudget | None,
@@ -111,7 +111,7 @@ async def login(
     ctx = {
         "totp": totp, "recovery_code": recovery_code,
         "ip": ip, "peer_ip": peer_ip, "budget": budget, "counter": counter,
-        "vault": vault, "recovery_hook": recovery_hook,
+        "vault": vault, "pepper": pepper,
     }
     if factor_hook is not None:
         failed_stage = await factor_hook(session, maker, acct, ctx)
@@ -124,7 +124,8 @@ async def login(
                     budget=budget, counter=counter)
         raise AppError("unauthorized", "authentication failed")
 
-    row, cookie = await create_session(session, purpose="full")
+    purpose = "recovery_reset" if ctx.get("recovery_login") else "full"
+    row, cookie = await create_session(session, purpose=purpose)
     # success audit is written by the route AFTER commit (a failed commit
     # must not leave an operator.login row for a session that never existed)
     return row, cookie
@@ -138,22 +139,27 @@ async def default_factor_hook(
     acct: OperatorAccount,
     ctx: dict[str, Any],
 ) -> str | None:
-    """Login second factor (§5): TOTP when enabled; recovery code alternative
-    (Task 6 attaches). A code supplied while TOTP is disabled is ignored."""
+    """Login second factor (§5): a recovery code replaces the TOTP factor and
+    is honored whether or not TOTP is enabled (consumed only on full success);
+    otherwise TOTP is required when enabled. A TOTP code supplied while TOTP is
+    disabled is ignored."""
     totp_code = ctx.get("totp")
     recovery_code = ctx.get("recovery_code")
+    if recovery_code is not None:
+        # recovery code replaces the TOTP factor (never the password); valid
+        # whether or not TOTP is enabled. Consumed only on full success.
+        from custos.operator.recovery import consume_code
+
+        if await consume_code(session, ctx["pepper"], recovery_code):
+            ctx["recovery_login"] = True
+            return None
+        return "login_recovery"
     if acct.totp_enabled:
-        if recovery_code is not None:
-            hook = ctx.get("recovery_hook")
-            if hook is not None and await hook(session, maker, recovery_code, ctx):
-                return None
-            return "login_recovery"
         if totp_code is None:
             return "login_totp"
         from custos.operator.totp import verify_totp
 
-        vault = ctx["vault"]
-        if await verify_totp(session, vault, totp_code, site="login"):
+        if await verify_totp(session, ctx["vault"], totp_code, site="login"):
             return None
         return "login_totp"
     return None

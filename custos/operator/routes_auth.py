@@ -71,6 +71,84 @@ async def _totp_audit(request: Request, sess: OperatorSession, reason: str) -> N
     )
 
 
+@router.post("/password-change")
+async def password_change_route(
+    request: Request, response: Response,
+    sess: OperatorSession = Depends(require_session),
+) -> dict[str, Any]:
+    from custos.operator.recovery import change_password
+    from custos.operator.sessions import set_session_cookie
+    from custos.routes_agent import _json_body
+
+    body = await _json_body(request)
+    current = body.get("current_password")
+    new = body.get("new_password")
+    if not isinstance(current, str) or not isinstance(new, str):
+        raise AppError("invalid", "current_password and new_password are required")
+    settings = request.app.state.settings
+    from custos.audit import record_audit
+    from custos.operator.login import resolve_client
+
+    ip, peer = resolve_client(request, settings)
+    async with request.app.state.session_maker() as session:
+        row = await session.get(OperatorSession, sess.id)
+        try:
+            promoted, fresh_codes, cookie = await change_password(
+                session, row, current=current, new=new, pepper=settings.pepper_raw,
+            )
+        except AppError as exc:
+            if exc.code == "unauthorized":
+                # failed current-password: audit + lockout accounting (§5)
+                from custos.audit import record_auth_event
+
+                await record_auth_event(
+                    request.app.state.session_maker, kind="login_password", ok=False,
+                    ip=ip, peer_ip=peer, budget=request.app.state.ledger_budget,
+                    counter=request.app.state.failure_counter,
+                )
+                await record_audit(
+                    request.app.state.session_maker, actor_kind="operator_session",
+                    actor_id=str(sess.id), actor_label="operator",
+                    action="operator.password_change", item_name=None, ok=False,
+                    detail={"reason": "bad_current_password"},
+                    budget=request.app.state.ledger_budget,
+                    counter=request.app.state.failure_counter,
+                )
+            raise
+        await session.commit()
+    if cookie:
+        set_session_cookie(response, cookie, settings)
+    await record_audit(
+        request.app.state.session_maker, actor_kind="operator_session",
+        actor_id=str(promoted.id), actor_label="operator",
+        action="operator.password_change", item_name=None, ok=True, detail={},
+    )
+    result: dict[str, Any] = {"password": "changed"}
+    if fresh_codes:
+        result["recovery_codes"] = fresh_codes
+    return result
+
+
+@router.post("/recovery/regen")
+async def recovery_regen(
+    request: Request, sess: OperatorSession = Depends(require_session)
+) -> dict[str, Any]:
+    from custos.operator.recovery import issue_codes
+
+    settings = request.app.state.settings
+    async with request.app.state.session_maker() as session:
+        codes = await issue_codes(session, settings.pepper_raw)
+        await session.commit()
+    from custos.audit import record_audit
+
+    await record_audit(
+        request.app.state.session_maker, actor_kind="operator_session",
+        actor_id=str(sess.id), actor_label="operator",
+        action="operator.recovery_regen", item_name=None, ok=True, detail={},
+    )
+    return {"recovery_codes": codes}
+
+
 @router.post("/totp/setup")
 async def totp_setup(
     request: Request, sess: OperatorSession = Depends(require_session)
@@ -156,7 +234,7 @@ async def login_route(request: Request, response: Response) -> dict[str, Any]:
             username=username, password=password, totp=totp,
             recovery_code=recovery_code, factor_hook=factor_hook,
             vault=request.app.state.vault,
-            recovery_hook=request.app.state.recovery_hook,
+            pepper=settings.pepper_raw,
             ip=ip, peer_ip=peer, budget=request.app.state.ledger_budget,
             counter=request.app.state.failure_counter,
         )

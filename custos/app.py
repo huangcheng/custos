@@ -180,7 +180,6 @@ def create_app(settings: Settings) -> FastAPI:
         from custos.operator.login import default_factor_hook
 
         app.state.login_factor_hook = default_factor_hook
-        app.state.recovery_hook = None  # recovery attaches in Task 6
         app.state.vault = Vault(parse_keyring(settings.keyring_raw))
         # provision the setup code at first startup (§5), only while no
         # account exists — never recreate a consumed code
