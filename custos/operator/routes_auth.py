@@ -61,6 +61,52 @@ async def logout(
     return {"logout": "complete"}
 
 
+@router.post("/login")
+async def login_route(request: Request, response: Response) -> dict[str, Any]:
+    from custos.operator.login import login, resolve_client
+    from custos.operator.sessions import set_session_cookie
+    from custos.routes_agent import _json_body
+
+    settings = request.app.state.settings
+    body = await _json_body(request)
+    username = body.get("username")
+    password = body.get("password")
+    totp = body.get("totp")
+    recovery_code = body.get("recovery_code")
+    if not isinstance(username, str):
+        raise AppError("invalid", "username is required")
+    if not isinstance(password, str):
+        raise AppError("invalid", "password is required")
+    for field_name, value in (("totp", totp), ("recovery_code", recovery_code)):
+        if value is not None and not isinstance(value, str):
+            raise AppError("invalid", f"{field_name} must be a string")
+    if totp is not None and recovery_code is not None:
+        raise AppError("invalid", "supply at most one second factor")
+    ip, peer = resolve_client(request, settings)
+    factor_hook = request.app.state.login_factor_hook
+    async with request.app.state.session_maker() as session:
+        row, cookie = await login(
+            session, request.app.state.session_maker,
+            semaphore=request.app.state.auth_semaphore,
+            executor=request.app.state.auth_executor,
+            wait_cap=getattr(request.app.state, "auth_wait_cap", 10.0),
+            username=username, password=password, totp=totp,
+            recovery_code=recovery_code, factor_hook=factor_hook,
+            ip=ip, peer_ip=peer, budget=request.app.state.ledger_budget,
+            counter=request.app.state.failure_counter,
+        )
+        await session.commit()
+    from custos.audit import record_audit
+
+    await record_audit(
+        request.app.state.session_maker, actor_kind="operator_session",
+        actor_id=str(row.id), actor_label=username, action="operator.login",
+        item_name=None, ok=True, detail={},
+    )
+    set_session_cookie(response, cookie, settings)
+    return {"csrf_token": row.csrf_token}
+
+
 @router.post("/setup")
 async def setup(request: Request) -> dict[str, Any]:
     from custos.routes_agent import _json_body

@@ -170,6 +170,14 @@ def create_app(settings: Settings) -> FastAPI:
         app.state.rate_limiter = RateLimiter()
         app.state.ledger_budget = LedgerBudget()
         app.state.failure_counter = FailureCounter()
+        # global argon2 concurrency cap (§5): 2 concurrent password verifications
+        app.state.auth_semaphore = asyncio.Semaphore(2)
+        from concurrent.futures import ThreadPoolExecutor
+
+        app.state.auth_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="argon2"
+        )
+        app.state.login_factor_hook = None  # TOTP/recovery attach in Tasks 5/6
         app.state.vault = Vault(parse_keyring(settings.keyring_raw))
         # provision the setup code at first startup (§5), only while no
         # account exists — never recreate a consumed code
@@ -198,6 +206,7 @@ def create_app(settings: Settings) -> FastAPI:
             async with mcp_sub.router.lifespan_context(mcp_sub):
                 yield
         finally:
+            app.state.auth_executor.shutdown(wait=False)
             await engine.dispose()
 
     app = FastAPI(
