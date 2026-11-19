@@ -84,6 +84,15 @@ async def login_route(request: Request, response: Response) -> dict[str, Any]:
         raise AppError("invalid", "supply at most one second factor")
     ip, peer = resolve_client(request, settings)
     factor_hook = request.app.state.login_factor_hook
+    from custos.operator.lockout import check_lockout
+
+    async with request.app.state.session_maker() as session:
+        acct_exists = (
+            await session.execute(select(OperatorAccount.id))
+        ).first() is not None
+        await check_lockout(session, ip=ip, account_exists=acct_exists,
+                            counter=request.app.state.failure_counter)
+    request.app.state.rate_limiter.check_unauth(ip)  # 429 before verify, no ledger
     async with request.app.state.session_maker() as session:
         row, cookie = await login(
             session, request.app.state.session_maker,
@@ -146,6 +155,11 @@ async def setup(request: Request) -> dict[str, Any]:
                 counter=request.app.state.failure_counter,
             )
             raise AppError("setup_complete", "setup already completed")
+        from custos.operator.lockout import check_lockout
+
+        await check_lockout(session, ip=ip, account_exists=False,
+                            counter=request.app.state.failure_counter)
+        request.app.state.rate_limiter.check_unauth(ip, setup=True)
         try:
             expected = request.app.state.setup_code or ensure_setup_code(settings)
         except OSError:

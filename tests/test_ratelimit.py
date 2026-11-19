@@ -45,3 +45,17 @@ def test_failures_table_bounded_under_ip_rotation() -> None:
     for i in range(5000):
         limiter.record_failed_auth(f"2001:db8::{i:x}")
     assert len(limiter._failures) <= 4096
+
+
+def test_setup_global_quota_not_burned_by_rejected_ip() -> None:
+    limiter = RateLimiter()
+    # one IP exhausts its 3/min setup bucket; attempts 4+ are rejected per-IP
+    for _ in range(3):
+        limiter.check_unauth("203.0.113.1", setup=True)
+    import contextlib
+
+    for _ in range(20):
+        with contextlib.suppress(AppError):
+            limiter.check_unauth("203.0.113.1", setup=True)
+    # a different IP must still get its setup attempts (global quota intact)
+    limiter.check_unauth("203.0.113.2", setup=True)

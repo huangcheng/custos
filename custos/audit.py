@@ -170,6 +170,22 @@ class FailureCounter:
         events.append(now)
         self._evict_overflow()
 
+    def nth_most_recent_ts(
+        self, n: int, *, ip: str | None = None, account: bool = False
+    ) -> float | None:
+        """Monotonic ts of the Nth-most-recent event in the window (anchor for
+        non-extending lockout under the flood fallback), or None if fewer."""
+        key = "account" if account else f"ip:{ip}"
+        events = self._events.get(key)
+        if events is None:
+            return None
+        now = time.monotonic()
+        window = self._account_window if account else self._window
+        live = [t for t in events if now - t <= window]
+        if len(live) < n:
+            return None
+        return sorted(live)[-n]
+
     def count(self, *, ip: str | None = None, account: bool = False) -> int:
         if account:
             key = "account"

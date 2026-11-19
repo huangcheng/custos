@@ -176,3 +176,38 @@ async def test_failed_login_commit_leaves_no_success_audit(login_stack) -> None:
                 .scalars().all()
             )
             assert rows  # committed session -> audit present
+
+
+async def test_lockout_blocks_login_before_verify(login_stack) -> None:
+    async with login_stack() as (client, maker, app):
+        # seed 10 login_password failures for the ASGI client IP (testclient)
+        from datetime import UTC, datetime
+
+        from custos.db.models import AuthEvent
+
+        async with maker() as s:
+            for _ in range(10):
+                s.add(AuthEvent(kind="login_password", ok=False, ip="127.0.0.1",
+                                peer_ip="127.0.0.1", ts=datetime.now(UTC)))
+            await s.commit()
+        r = await client.post("/api/auth/login",
+                              json={"username": "operator", "password": PW})
+        assert r.status_code == 429
+        assert r.json()["code"] == "locked_out"
+
+
+async def test_429_gated_request_writes_no_ledger(login_stack) -> None:
+    async with login_stack() as (client, maker, app):
+        # exhaust the unauth bucket (10/min/IP) with bad-password attempts,
+        # then the next request must 429 without adding an auth_event
+        for _ in range(10):
+            await client.post("/api/auth/login",
+                              json={"username": "operator", "password": "wrong-password-12"})
+        async with maker() as s:
+            before = len((await s.execute(select(AuthEvent))).scalars().all())
+        r = await client.post("/api/auth/login",
+                              json={"username": "operator", "password": "wrong-password-12"})
+        assert r.status_code == 429
+        async with maker() as s:
+            after = len((await s.execute(select(AuthEvent))).scalars().all())
+        assert after == before  # 429-gated request added no row

@@ -27,6 +27,26 @@ class RateLimiter:
         self._requests: dict[str, deque[float]] = {}
         self._failures: dict[str, deque[float]] = {}
         self._inflight: dict[str, int] = {}
+        self._unauth: dict[str, deque[float]] = {}
+        self._setup_global: deque[float] = deque()
+
+    def check_unauth(self, ip: str, *, setup: bool = False) -> None:
+        """Unauthenticated credential endpoints: 10/min/IP (setup 3/min/IP +
+        global 10/min). Runs AFTER lockout, BEFORE credential verification."""
+        now = time.monotonic()
+        limit = 3 if setup else 10
+        # per-IP gate FIRST: a rejected attempt must not burn the global quota
+        self._bucket(self._unauth, f"{ip}:{'setup' if setup else 'auth'}", limit)
+        if setup:
+            while self._setup_global and now - self._setup_global[0] > _WINDOW:
+                self._setup_global.popleft()
+            if len(self._setup_global) >= 10:
+                raise AppError("rate_limited", headers={"Retry-After": "60"})
+            self._setup_global.append(now)
+        if len(self._unauth) > 4096:
+            self._sweep(self._unauth, now)
+        while len(self._unauth) > 4096:
+            self._unauth.pop(next(iter(self._unauth)))
 
     def _bucket(self, table: dict[str, deque[float]], key: str, limit: int) -> None:
         now = time.monotonic()
