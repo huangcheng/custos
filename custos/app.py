@@ -180,6 +180,12 @@ def create_app(settings: Settings) -> FastAPI:
         from custos.operator.login import default_factor_hook
 
         app.state.login_factor_hook = default_factor_hook
+        # long-lived siteverify client (one TLS pool, not per-login handshake)
+        import httpx as _httpx
+
+        app.state.turnstile_client = (
+            _httpx.AsyncClient(timeout=5.0) if settings.turnstile_secret else None
+        )
         app.state.vault = Vault(parse_keyring(settings.keyring_raw))
         # provision the setup code at first startup (§5), only while no
         # account exists — never recreate a consumed code
@@ -209,6 +215,8 @@ def create_app(settings: Settings) -> FastAPI:
                 yield
         finally:
             app.state.auth_executor.shutdown(wait=False)
+            if app.state.turnstile_client is not None:
+                await app.state.turnstile_client.aclose()
             await engine.dispose()
 
     app = FastAPI(

@@ -47,6 +47,8 @@ class Settings:
     setup_code: str | None = field(default=None, repr=False)
     operator_password: str | None = field(default=None, repr=False)
     turnstile_sitekey: str | None = None
+    turnstile_secret: str | None = field(default=None, repr=False)
+    turnstile_hostnames: tuple[str, ...] = ()
 
 
 def _get(env: Mapping[str, str], name: str) -> str | None:
@@ -258,6 +260,27 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     except CryptoError as exc:
         raise ConfigError(str(exc)) from exc
 
+    turnstile_secret = _paired(env, "CUSTOS_TURNSTILE_SECRET")
+    turnstile_sitekey = _paired(env, "CUSTOS_TURNSTILE_SITEKEY")
+    if (turnstile_secret is None) != (turnstile_sitekey is None):
+        raise ConfigError("CUSTOS_TURNSTILE_SECRET and _SITEKEY are both-or-neither")
+    turnstile_hostnames: tuple[str, ...] = ()
+    if turnstile_secret is not None:
+        hostnames_raw = _get(env, "CUSTOS_TURNSTILE_HOSTNAMES")
+        if not hostnames_raw:
+            raise ConfigError("CUSTOS_TURNSTILE_HOSTNAMES required when Turnstile enabled")
+        turnstile_hostnames = tuple(h.strip() for h in hostnames_raw.split(",") if h.strip())
+        if not turnstile_hostnames:
+            raise ConfigError("CUSTOS_TURNSTILE_HOSTNAMES is set but empty")
+        for host in turnstile_hostnames:
+            # Siteverify hostname is a bare lowercase DNS name (no scheme/port)
+            if not re.fullmatch(r"[a-z0-9.-]+", host):
+                raise ConfigError(
+                    "CUSTOS_TURNSTILE_HOSTNAMES entries must be bare lowercase hostnames"
+                )
+        if insecure_dev:
+            raise ConfigError("Turnstile cannot be enabled in CUSTOS_INSECURE_DEV mode")
+
     setup_code = _get(env, "CUSTOS_SETUP_CODE")
     if setup_code is not None and len(setup_code) < 22:
         raise ConfigError("CUSTOS_SETUP_CODE must be at least 22 chars (128 bits)")
@@ -282,4 +305,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         pepper_raw=pepper_bytes,
         setup_code=setup_code,
         operator_password=operator_password,
+        turnstile_sitekey=turnstile_sitekey,
+        turnstile_secret=turnstile_secret,
+        turnstile_hostnames=turnstile_hostnames,
     )

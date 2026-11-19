@@ -225,6 +225,28 @@ async def login_route(request: Request, response: Response) -> dict[str, Any]:
         await check_lockout(session, ip=ip, account_exists=acct_exists,
                             counter=request.app.state.failure_counter)
     request.app.state.rate_limiter.check_unauth(ip)  # 429 before verify, no ledger
+    # Turnstile (when configured): after lockout+limiter, before credentials.
+    # Failure is audit-only (no auth_events row -> never credential-lockout).
+    if settings.turnstile_secret:
+        from custos.audit import record_audit
+        from custos.operator import turnstile as turnstile_mod
+
+        token = body.get("turnstile")
+        if token is not None and not isinstance(token, str):
+            raise AppError("invalid", "turnstile must be a string")
+        try:
+            await turnstile_mod.verify_turnstile(
+                settings, token, ip, client=request.app.state.turnstile_client
+            )
+        except AppError:
+            await record_audit(
+                request.app.state.session_maker, actor_kind="anonymous", actor_id=None,
+                actor_label="anonymous", action="auth.failure", item_name=None, ok=False,
+                detail={"ip": ip, "reason": "turnstile"},
+                budget=request.app.state.ledger_budget,
+                counter=request.app.state.failure_counter,
+            )
+            raise
     async with request.app.state.session_maker() as session:
         row, cookie = await login(
             session, request.app.state.session_maker,
