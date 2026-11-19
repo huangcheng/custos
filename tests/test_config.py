@@ -27,6 +27,8 @@ def env(**extra: str) -> dict[str, str]:
     combined = {**BASE_ENV, **extra}
     if combined.get("CUSTOS_PUBLIC_BIND") == "1" and "CUSTOS_ALLOWED_ORIGINS" not in combined:
         combined["CUSTOS_ALLOWED_ORIGINS"] = "https://console.example"
+    if combined.get("CUSTOS_ALLOWED_ORIGINS") and "CUSTOS_WEBAUTHN_RP_ID" not in combined:
+        combined["CUSTOS_WEBAUTHN_RP_ID"] = "console.example"
     return combined
 
 
@@ -362,7 +364,8 @@ def test_allowed_origins_parsed_and_normalized() -> None:
     s = load_settings(env(CUSTOS_ALLOWED_ORIGINS="https://a.example, https://b.example"))
     assert s.allowed_origins == ("https://a.example", "https://b.example")
     # trailing slash normalized away (exact-match check_origin)
-    s2 = load_settings(env(CUSTOS_ALLOWED_ORIGINS="https://c.example/"))
+    s2 = load_settings(env(CUSTOS_ALLOWED_ORIGINS="https://c.example/",
+                           CUSTOS_WEBAUTHN_RP_ID="c.example"))
     assert s2.allowed_origins == ("https://c.example",)
     assert load_settings(env()).allowed_origins == ()
 

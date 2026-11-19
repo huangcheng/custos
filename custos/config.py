@@ -49,6 +49,7 @@ class Settings:
     turnstile_sitekey: str | None = None
     turnstile_secret: str | None = field(default=None, repr=False)
     turnstile_hostnames: tuple[str, ...] = ()
+    webauthn_rp_id: str | None = None
 
 
 def _get(env: Mapping[str, str], name: str) -> str | None:
@@ -265,6 +266,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     if (turnstile_secret is None) != (turnstile_sitekey is None):
         raise ConfigError("CUSTOS_TURNSTILE_SECRET and _SITEKEY are both-or-neither")
     turnstile_hostnames: tuple[str, ...] = ()
+    webauthn_rp_id: str | None = None
     if turnstile_secret is not None:
         hostnames_raw = _get(env, "CUSTOS_TURNSTILE_HOSTNAMES")
         if not hostnames_raw:
@@ -280,6 +282,17 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
                 )
         if insecure_dev:
             raise ConfigError("Turnstile cannot be enabled in CUSTOS_INSECURE_DEV mode")
+
+    webauthn_rp_id = _get(env, "CUSTOS_WEBAUTHN_RP_ID")
+    if (webauthn_rp_id is None) != (not allowed_origins) and not insecure_dev:
+        raise ConfigError(
+            "CUSTOS_WEBAUTHN_RP_ID and CUSTOS_ALLOWED_ORIGINS are both-or-neither"
+        )
+    if webauthn_rp_id is not None:
+        if not re.fullmatch(r"[a-z0-9.-]+", webauthn_rp_id):
+            raise ConfigError("CUSTOS_WEBAUTHN_RP_ID must be a bare lowercase hostname")
+        if insecure_dev and webauthn_rp_id not in ("localhost", "127.0.0.1"):
+            raise ConfigError("dev-mode CUSTOS_WEBAUTHN_RP_ID must be loopback")
 
     setup_code = _get(env, "CUSTOS_SETUP_CODE")
     if setup_code is not None and len(setup_code) < 22:
@@ -308,4 +321,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         turnstile_sitekey=turnstile_sitekey,
         turnstile_secret=turnstile_secret,
         turnstile_hostnames=turnstile_hostnames,
+        webauthn_rp_id=webauthn_rp_id,
     )

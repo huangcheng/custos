@@ -8,7 +8,14 @@ from fastapi import Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from custos.db.models import OperatorAccount, OperatorSession, OperatorToken, RecoveryCode
+from custos.db.models import (
+    OperatorAccount,
+    OperatorSession,
+    OperatorToken,
+    RecoveryCode,
+    StepUpToken,
+    WebAuthnChallenge,
+)
 from custos.errors import AppError
 from custos.operator.recovery import (
     change_password,
@@ -38,6 +45,8 @@ async def maker(pg_db: str):
             acct.totp_enabled = False
         from sqlalchemy import delete
 
+        await s.execute(delete(StepUpToken))  # before sessions (FK)
+        await s.execute(delete(WebAuthnChallenge))
         await s.execute(delete(RecoveryCode))
         await s.execute(delete(OperatorSession))
         await s.execute(delete(OperatorToken))
@@ -190,8 +199,9 @@ def rec_http(pg_db: str):
             acct.totp_enabled = True  # force recovery path
             from sqlalchemy import delete
 
-            from custos.db.models import AuthEvent, StepUpToken
+            from custos.db.models import AuthEvent, StepUpToken, WebAuthnChallenge
             await s.execute(delete(StepUpToken))  # before sessions (FK)
+            await s.execute(delete(WebAuthnChallenge))
             await s.execute(delete(AuthEvent))
             await s.execute(delete(RecoveryCode))
             await s.execute(delete(OperatorSession))

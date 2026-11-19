@@ -11,7 +11,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from custos.app import create_app
 from custos.config import load_settings
 from custos.crypto import Vault, parse_keyring
-from custos.db.models import AuthEvent, OperatorAccount, OperatorSession, StepUpToken
+from custos.db.models import (
+    AuthEvent,
+    OperatorAccount,
+    OperatorSession,
+    StepUpToken,
+    WebAuthnChallenge,
+)
 from custos.errors import AppError
 from custos.operator.account import hash_password
 from custos.operator.stepup import consume_step_up, mint_step_up
@@ -42,6 +48,7 @@ async def env2(pg_db: str):
         from sqlalchemy import delete
 
         await s.execute(delete(StepUpToken))
+        await s.execute(delete(WebAuthnChallenge))
         await s.execute(delete(OperatorSession))
         await s.execute(delete(AuthEvent))
         await s.commit()

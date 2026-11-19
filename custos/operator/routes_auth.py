@@ -15,6 +15,7 @@ from custos.operator.stepup import require_step_up
 
 _STEP_UP_TOTP = Depends(require_step_up("totp"))
 _STEP_UP_RECOVERY = Depends(require_step_up("recovery"))
+_STEP_UP_PASSKEY = Depends(require_step_up("passkey"))
 
 router = APIRouter(prefix="/api/auth")
 
@@ -29,7 +30,10 @@ async def status(request: Request) -> dict[str, Any]:
         "setup_required": acct is None,
         "totp_required": bool(acct is not None and acct.totp_enabled),
         "turnstile_sitekey": request.app.state.settings.turnstile_sitekey,
-        "passkey_available": False,
+        "passkey_available": bool(
+            request.app.state.settings.webauthn_rp_id
+            or request.app.state.settings.insecure_dev
+        ),
     }
     cookie = request.cookies.get(COOKIE_NAME)
     if cookie and not request.headers.get("authorization"):
@@ -73,6 +77,175 @@ async def _totp_audit(request: Request, sess: OperatorSession, reason: str) -> N
         actor_id=str(sess.id), actor_label="operator", action="operator.totp_change",
         item_name=None, ok=True, detail={"reason": reason},
     )
+
+
+def _passkeys_enabled(request: Request) -> None:
+    settings = request.app.state.settings
+    if not settings.webauthn_rp_id and not settings.insecure_dev:
+        raise AppError("not_found", "not found")
+
+
+@router.post("/passkeys/register/options")
+async def passkey_reg_options(
+    request: Request, sess: OperatorSession = _STEP_UP_PASSKEY
+) -> dict[str, Any]:
+    from custos.operator import passkeys
+
+    _passkeys_enabled(request)
+    async with request.app.state.session_maker() as session:
+        opts = await passkeys.registration_options(session, request.app.state.settings, sess.id)
+        await session.commit()
+    return opts
+
+
+@router.post("/passkeys/register/verify")
+async def passkey_reg_verify(
+    request: Request, sess: OperatorSession = _STEP_UP_PASSKEY
+) -> dict[str, Any]:
+    from custos.operator import passkeys
+    from custos.routes_agent import _json_body
+
+    _passkeys_enabled(request)
+    body = await _json_body(request)
+    async with request.app.state.session_maker() as session:
+        await passkeys.register_verify(session, request.app.state.settings, sess.id, body)
+        await session.commit()
+    from custos.audit import record_audit
+
+    await record_audit(
+        request.app.state.session_maker, actor_kind="operator_session",
+        actor_id=str(sess.id), actor_label="operator", action="operator.passkey_change",
+        item_name=None, ok=True, detail={"reason": "register"},
+    )
+    return {"passkey": "registered"}
+
+
+@router.get("/passkeys")
+async def passkey_list(
+    request: Request, sess: OperatorSession = _STEP_UP_PASSKEY
+) -> dict[str, Any]:
+    from custos.db.models import PasskeyCredential
+
+    _passkeys_enabled(request)
+    async with request.app.state.session_maker() as session:
+        rows = (await session.execute(select(PasskeyCredential))).scalars().all()
+    return {"passkeys": [{"id": str(r.id), "label": r.label} for r in rows]}
+
+
+@router.delete("/passkeys/{cred_id}")
+async def passkey_delete(
+    cred_id: str, request: Request,
+    sess: OperatorSession = _STEP_UP_PASSKEY,
+) -> dict[str, Any]:
+    import uuid as _uuid
+
+    from custos.db.models import PasskeyCredential
+
+    _passkeys_enabled(request)
+    try:
+        parsed_id = _uuid.UUID(cred_id)
+    except ValueError:
+        raise AppError("not_found", "not found") from None
+    async with request.app.state.session_maker() as session:
+        row = await session.get(PasskeyCredential, parsed_id)
+        if row is None:
+            raise AppError("not_found", "not found")
+        await session.delete(row)
+        await session.commit()
+    from custos.audit import record_audit
+
+    await record_audit(
+        request.app.state.session_maker, actor_kind="operator_session",
+        actor_id=str(sess.id), actor_label="operator", action="operator.passkey_change",
+        item_name=None, ok=True, detail={"reason": "remove"},
+    )
+    return {"passkey": "removed"}
+
+
+@router.post("/passkeys/assert/options")
+async def passkey_assert_options(request: Request) -> dict[str, Any]:
+    from custos.operator import passkeys
+
+    _passkeys_enabled(request)
+    from custos.operator.login import resolve_client
+
+    ip, _peer = resolve_client(request, request.app.state.settings)
+    request.app.state.rate_limiter.check_unauth(ip)
+    async with request.app.state.session_maker() as session:
+        opts = await passkeys.assertion_options(session, request.app.state.settings)
+        await session.commit()
+    return opts
+
+
+@router.post("/passkeys/assert/verify")
+async def passkey_assert_verify(request: Request, response: Response) -> dict[str, Any]:
+    from custos.operator import passkeys
+    from custos.operator.sessions import create_session, set_session_cookie
+    from custos.routes_agent import _json_body
+
+    _passkeys_enabled(request)
+    settings = request.app.state.settings
+    body = await _json_body(request)
+    from custos.operator.lockout import check_lockout
+    from custos.operator.login import resolve_client
+
+    ip, peer = resolve_client(request, settings)
+    async with request.app.state.session_maker() as session:
+        await check_lockout(session, ip=ip, account_exists=True,
+                            counter=request.app.state.failure_counter)
+    request.app.state.rate_limiter.check_unauth(ip)
+    if settings.turnstile_secret:
+        from custos.operator import turnstile as turnstile_mod
+
+        token = body.get("turnstile")
+        if token is not None and not isinstance(token, str):
+            raise AppError("invalid", "turnstile must be a string")
+        try:
+            await turnstile_mod.verify_turnstile(
+                settings, token, ip, client=request.app.state.turnstile_client
+            )
+        except AppError:
+            from custos.audit import record_audit
+
+            await record_audit(
+                request.app.state.session_maker, actor_kind="anonymous", actor_id=None,
+                actor_label="anonymous", action="auth.failure", item_name=None, ok=False,
+                detail={"ip": ip, "reason": "turnstile"},
+                budget=request.app.state.ledger_budget,
+                counter=request.app.state.failure_counter,
+            )
+            raise
+    try:
+        async with request.app.state.session_maker() as session:
+            await passkeys.assertion_verify(session, settings, body)
+            row, cookie = await create_session(session, purpose="full")
+            await session.commit()
+    except AppError as exc:
+        if exc.code == "unauthorized":
+            from custos.audit import record_audit, record_auth_event
+
+            await record_auth_event(
+                request.app.state.session_maker, kind="login_passkey", ok=False,
+                ip=ip, peer_ip=peer, budget=request.app.state.ledger_budget,
+                counter=request.app.state.failure_counter,
+            )
+            await record_audit(
+                request.app.state.session_maker, actor_kind="anonymous", actor_id=None,
+                actor_label="anonymous", action="auth.failure", item_name=None, ok=False,
+                detail={"ip": ip, "reason": "login_passkey"},
+                budget=request.app.state.ledger_budget,
+                counter=request.app.state.failure_counter,
+            )
+        raise
+    from custos.audit import record_audit
+
+    await record_audit(
+        request.app.state.session_maker, actor_kind="operator_session",
+        actor_id=str(row.id), actor_label="operator", action="operator.login",
+        item_name=None, ok=True, detail={"reason": "passkey"},
+    )
+    set_session_cookie(response, cookie, settings)
+    return {"csrf_token": row.csrf_token}
 
 
 @router.post("/step-up")
