@@ -56,7 +56,9 @@ except subprocess.CalledProcessError as exc:
     sys.exit(f"secrets chown failed: {exc.stderr.decode(errors='replace')}")
 with open(f"{run}/env", "w") as f:
     f.write(f"CUSTOS_DB_PASSWORD={pw}\nCUSTOS_SECRETS_DIR={run}/secrets\n"
-            f"CUSTOS_TRUSTED_PROXIES=172.16.0.0/12\nCUSTOS_PORT={os.environ['E2E_PORT']}\n")
+            f"CUSTOS_TRUSTED_PROXIES=172.16.0.0/12\nCUSTOS_PORT={os.environ['E2E_PORT']}\n"
+            f"CUSTOS_ALLOWED_ORIGINS=http://127.0.0.1:{os.environ['E2E_PORT']}\n"
+            f"CUSTOS_WEBAUTHN_RP_ID=127.0.0.1\n")
 PYEOF
 
 echo "== start stack"
@@ -67,6 +69,90 @@ for i in $(seq 1 60); do
   sleep 1
   [ "$i" = 60 ] && fail "app did not become healthy"
 done
+
+echo "== operator setup (real flow)"
+SETUP_CODE=$(docker exec "$PROJECT-app-1" sh -c 'cat /var/lib/custos/setup-code 2>/dev/null || true')
+if [ -z "$SETUP_CODE" ]; then fail "setup-code file not provisioned"; fi
+curl -fsS -m 10 -X POST "$BASE/api/auth/setup" -H 'content-type: application/json' \
+  -d "{\"username\":\"operator\",\"password\":\"cu-test-e2e-password\",\"setup_code\":\"$SETUP_CODE\"}" \
+  > /dev/null || fail "setup"
+# second setup -> 403
+S2=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$BASE/api/auth/setup" \
+  -H 'content-type: application/json' \
+  -d "{\"username\":\"x\",\"password\":\"cu-test-e2e-password\",\"setup_code\":\"$SETUP_CODE\"}")
+[ "$S2" = "403" ] || fail "second setup should 403, got $S2"
+
+echo "== operator login + device hand-off"
+LOGIN=$(curl -fsS -m 10 -c "$RUN_DIR/cookies" -X POST "$BASE/api/auth/login" \
+  -H 'content-type: application/json' \
+  -d '{"username":"operator","password":"cu-test-e2e-password"}')
+CSRF=$(printf '%s' "$LOGIN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["csrf_token"])')
+DEV=$(curl -fsS -m 10 -X POST "$BASE/api/auth/device" -H 'user-agent: e2e-cli')
+DCODE=$(printf '%s' "$DEV" | python3 -c 'import json,sys; print(json.load(sys.stdin)["device_code"])')
+APPR=$(curl -fsS -m 10 -b "$RUN_DIR/cookies" -X POST "$BASE/api/auth/device/approve" \
+  -H "x-csrf-token: $CSRF" -H 'content-type: application/json' \
+  -d "{\"device_code\":\"$DCODE\"}")
+TCODE=$(printf '%s' "$APPR" | python3 -c 'import json,sys; print(json.load(sys.stdin)["transfer_code"])')
+EXCH=$(curl -fsS -m 10 -X POST "$BASE/api/auth/device-exchange" -H 'content-type: application/json' \
+  -d "{\"device_code\":\"$DCODE\",\"transfer_code\":\"$TCODE\"}")
+printf '%s' "$EXCH" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "csrf_token" in d and len(d["csrf_token"])==43' || fail "device exchange"
+# Attempt-cap + re-approval semantics are verified in-process against the real
+# DB (the shared 10/min/IP unauth bucket would otherwise throttle the rapid
+# exchange attempts; the HTTP happy path above already proved the wire flow).
+if ! docker exec -i "$PROJECT-app-1" /app/.venv/bin/python - <<'PYEOF'
+import asyncio
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy import select
+from custos.config import load_settings
+from custos.db.models import OperatorSession
+from custos.operator.device import mint_device, approve_device, exchange_device
+from custos.operator.sessions import create_session
+from custos.errors import AppError
+
+async def main():
+    s = load_settings()
+    engine = create_async_engine(s.database_url)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as sess:
+        row, _ = await create_session(sess)
+        await sess.commit()
+        sid = row.id
+    async with maker() as sess:
+        code, _ = await mint_device(sess, ip="203.0.113.99", user_agent="e2e")
+        await sess.commit()
+    async with maker() as sess:
+        row = await sess.get(OperatorSession, sid)
+        transfer = await approve_device(sess, row, code)
+        await sess.commit()
+    # re-approval rejected
+    async with maker() as sess:
+        row = await sess.get(OperatorSession, sid)
+        try:
+            await approve_device(sess, row, code)
+            raise SystemExit("re-approval should fail")
+        except AppError as e:
+            assert e.code == "conflict", e.code
+    # 5 wrong attempts burn the row; 6th (correct) is dead
+    for _ in range(5):
+        async with maker() as sess:
+            try:
+                await exchange_device(sess, maker, code, "wrong")
+                raise SystemExit("wrong transfer should fail")
+            except AppError:
+                pass
+            await sess.commit()
+    async with maker() as sess:
+        try:
+            await exchange_device(sess, maker, code, transfer)
+            raise SystemExit("6th attempt should be dead")
+        except AppError:
+            pass
+    await engine.dispose()
+    print("DEVICE-CAP-OK")
+
+asyncio.run(main())
+PYEOF
+then fail "device attempt-cap"; fi
 
 echo "== seed agent keys (E2E scaffolding, pre-operator-auth)"
 docker exec -i "$PROJECT-app-1" /app/.venv/bin/python - < scripts/e2e_seed.py > "$RUN_DIR/tokens.json" \

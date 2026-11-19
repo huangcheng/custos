@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from custos.db.models import (
+    DeviceCode,
     OperatorAccount,
     OperatorSession,
     OperatorToken,
@@ -48,6 +49,7 @@ async def maker(pg_db: str):
         await s.execute(delete(StepUpToken))  # before sessions (FK)
         await s.execute(delete(WebAuthnChallenge))
         await s.execute(delete(RecoveryCode))
+        await s.execute(delete(DeviceCode))
         await s.execute(delete(OperatorSession))
         await s.execute(delete(OperatorToken))
         await s.commit()
@@ -204,6 +206,7 @@ def rec_http(pg_db: str):
             await s.execute(delete(WebAuthnChallenge))
             await s.execute(delete(AuthEvent))
             await s.execute(delete(RecoveryCode))
+            await s.execute(delete(DeviceCode))
             await s.execute(delete(OperatorSession))
             codes = await issue_codes(s, settings.pepper_raw)
             await s.commit()

@@ -35,6 +35,8 @@ services:
       # No default: trusting all docker ranges would trust sibling containers.
       # Set to the reverse proxy's actual address/CIDR.
       CUSTOS_TRUSTED_PROXIES: ${CUSTOS_TRUSTED_PROXIES:?set CUSTOS_TRUSTED_PROXIES}
+      CUSTOS_ALLOWED_ORIGINS: ${CUSTOS_ALLOWED_ORIGINS:?set CUSTOS_ALLOWED_ORIGINS}
+      CUSTOS_WEBAUTHN_RP_ID: ${CUSTOS_WEBAUTHN_RP_ID:?set CUSTOS_WEBAUTHN_RP_ID}
       CUSTOS_DATA_DIR: /var/lib/custos
     volumes:
       # Directory mount (single-file binds break on atomic-replace rotation).

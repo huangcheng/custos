@@ -13,6 +13,7 @@ from custos.config import load_settings
 from custos.crypto import Vault, parse_keyring
 from custos.db.models import (
     AuthEvent,
+    DeviceCode,
     OperatorAccount,
     OperatorSession,
     StepUpToken,
@@ -49,6 +50,7 @@ async def env2(pg_db: str):
 
         await s.execute(delete(StepUpToken))
         await s.execute(delete(WebAuthnChallenge))
+        await s.execute(delete(DeviceCode))
         await s.execute(delete(OperatorSession))
         await s.execute(delete(AuthEvent))
         await s.commit()

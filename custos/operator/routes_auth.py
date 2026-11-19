@@ -248,6 +248,143 @@ async def passkey_assert_verify(request: Request, response: Response) -> dict[st
     return {"csrf_token": row.csrf_token}
 
 
+@router.post("/device")
+async def device_mint(request: Request) -> dict[str, Any]:
+    from custos.operator.device import mint_device
+    from custos.operator.login import resolve_client
+
+    settings = request.app.state.settings
+    ip, _peer = resolve_client(request, settings)
+    request.app.state.rate_limiter.check_unauth(ip)
+    ua = request.headers.get("user-agent", "")
+    async with request.app.state.session_maker() as session:
+        code, expires = await mint_device(session, ip=ip, user_agent=ua)
+        await session.commit()
+    from custos.audit import record_audit
+
+    await record_audit(
+        request.app.state.session_maker, actor_kind="anonymous", actor_id=None,
+        actor_label="anonymous", action="device.login", item_name=None, ok=True,
+        detail={"stage": "mint"},
+    )
+    return {"device_code": code, "expires_at": expires.isoformat()}
+
+
+@router.post("/device/lookup")
+async def device_lookup(
+    request: Request, sess: OperatorSession = Depends(require_session)
+) -> dict[str, Any]:
+    from custos.operator.device import lookup_device
+    from custos.routes_agent import _json_body
+
+    body = await _json_body(request)
+    code = body.get("device_code")
+    if not isinstance(code, str):
+        raise AppError("invalid", "device_code is required")
+    async with request.app.state.session_maker() as session:
+        try:
+            info = await lookup_device(session, code)
+        except AppError:
+            from custos.audit import record_audit
+
+            await record_audit(
+                request.app.state.session_maker, actor_kind="operator_session",
+                actor_id=str(sess.id), actor_label="operator", action="device.login",
+                item_name=None, ok=False, detail={"stage": "lookup"},
+                budget=request.app.state.ledger_budget,
+                counter=request.app.state.failure_counter,
+            )
+            raise
+    from custos.audit import record_audit
+
+    await record_audit(
+        request.app.state.session_maker, actor_kind="operator_session",
+        actor_id=str(sess.id), actor_label="operator", action="device.login",
+        item_name=None, ok=True, detail={"stage": "lookup"},
+    )
+    return info
+
+
+@router.post("/device/approve")
+async def device_approve(
+    request: Request, sess: OperatorSession = Depends(require_session)
+) -> dict[str, Any]:
+    from custos.operator.device import approve_device
+    from custos.routes_agent import _json_body
+
+    body = await _json_body(request)
+    code = body.get("device_code")
+    if not isinstance(code, str):
+        raise AppError("invalid", "device_code is required")
+    from custos.audit import record_audit
+
+    async with request.app.state.session_maker() as session:
+        try:
+            transfer = await approve_device(session, sess, code)
+        except AppError:
+            await record_audit(
+                request.app.state.session_maker, actor_kind="operator_session",
+                actor_id=str(sess.id), actor_label="operator", action="device.login",
+                item_name=None, ok=False, detail={"stage": "approve"},
+                budget=request.app.state.ledger_budget,
+                counter=request.app.state.failure_counter,
+            )
+            raise
+        await session.commit()
+    await record_audit(
+        request.app.state.session_maker, actor_kind="operator_session",
+        actor_id=str(sess.id), actor_label="operator", action="device.login",
+        item_name=None, ok=True, detail={"stage": "approve"},
+    )
+    return {"transfer_code": transfer}
+
+
+@router.post("/device-exchange")
+async def device_exchange(request: Request, response: Response) -> dict[str, Any]:
+    from custos.operator.device import exchange_device
+    from custos.operator.login import resolve_client
+    from custos.operator.sessions import set_session_cookie
+    from custos.routes_agent import _json_body
+
+    settings = request.app.state.settings
+    body = await _json_body(request)
+    code = body.get("device_code")
+    transfer = body.get("transfer_code")
+    if not isinstance(code, str) or not isinstance(transfer, str):
+        raise AppError("invalid", "device_code and transfer_code are required")
+    try:
+        code.encode("utf-8")
+        transfer.encode("utf-8")
+    except UnicodeEncodeError:
+        raise AppError("invalid", "inputs must be valid UTF-8") from None
+    ip, _peer = resolve_client(request, settings)
+    request.app.state.rate_limiter.check_unauth(ip)
+    from custos.audit import record_audit
+
+    async with request.app.state.session_maker() as session:
+        try:
+            sess_row, cookie = await exchange_device(
+                session, request.app.state.session_maker, code, transfer
+            )
+        except AppError:
+            await record_audit(
+                request.app.state.session_maker, actor_kind="anonymous", actor_id=None,
+                actor_label="anonymous", action="device.login", item_name=None, ok=False,
+                detail={"stage": "exchange", "ip": ip},
+                budget=request.app.state.ledger_budget,
+                counter=request.app.state.failure_counter,
+            )
+            raise
+        await session.commit()
+    await record_audit(
+        request.app.state.session_maker, actor_kind="operator_session",
+        actor_id=str(sess_row.id), actor_label="operator", action="device.login",
+        item_name=None, ok=True, detail={"stage": "exchange"},
+    )
+    set_session_cookie(response, cookie, settings)
+    return {"csrf_token": sess_row.csrf_token}
+
+
 @router.post("/step-up")
 async def step_up_route(
     request: Request, sess: OperatorSession = Depends(require_session)
