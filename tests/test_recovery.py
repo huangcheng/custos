@@ -323,3 +323,43 @@ async def test_failed_current_password_audited(rec_http) -> None:
                 AuditRow.action == "operator.password_change",
                 AuditRow.ok.is_(False)))).scalars().all()
             assert rows  # failure audited
+
+
+async def test_full_session_change_returns_csrf(rec_http) -> None:
+    async with rec_http() as (client, maker, codes, app, settings):
+        async with maker() as s:
+            acct = (await s.execute(select(OperatorAccount))).scalar_one()
+            acct.totp_enabled = False
+            await s.commit()
+        r = await client.post("/api/auth/login",
+                              json={"username": "operator", "password": PW})
+        csrf = r.json()["csrf_token"]
+        su = await client.post("/api/auth/step-up", headers={"x-csrf-token": csrf},
+                               json={"password": PW})
+        r2 = await client.post("/api/auth/password-change",
+                               headers={"x-csrf-token": csrf,
+                                        "x-step-up-token": su.json()["step_up_token"]},
+                               json={"current_password": PW,
+                                     "new_password": "cu-test-new-password-12ch"})
+        assert r2.status_code == 200
+        assert "csrf_token" in r2.json()  # replacement session's token
+
+
+async def test_password_change_lockout_gated(rec_http) -> None:
+    from custos.db.models import AuthEvent
+
+    async with rec_http() as (client, maker, codes, app, settings):
+        r = await client.post("/api/auth/login", json={
+            "username": "operator", "password": PW, "recovery_code": codes[4]})
+        csrf = r.json()["csrf_token"]
+        async with maker() as s:
+            for _ in range(10):
+                s.add(AuthEvent(kind="login_password", ok=False, ip="127.0.0.1",
+                                peer_ip="127.0.0.1", ts=datetime.now(UTC)))
+            await s.commit()
+        r2 = await client.post("/api/auth/password-change",
+                               headers={"x-csrf-token": csrf},
+                               json={"current_password": PW,
+                                     "new_password": "cu-test-new-password-12ch"})
+        assert r2.status_code == 429
+        assert r2.json()["code"] == "locked_out"

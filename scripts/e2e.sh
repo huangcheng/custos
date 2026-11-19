@@ -122,7 +122,7 @@ async def main():
         await sess.commit()
     async with maker() as sess:
         row = await sess.get(OperatorSession, sid)
-        transfer = await approve_device(sess, row, code)
+        transfer, _deadline = await approve_device(sess, row, code)
         await sess.commit()
     # re-approval rejected
     async with maker() as sess:

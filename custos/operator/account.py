@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import secrets
 from pathlib import Path
+from typing import Any
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
@@ -100,6 +101,9 @@ async def setup_account(
     peer_ip: str,
     budget: LedgerBudget | None = None,
     counter: FailureCounter | None = None,
+    semaphore: Any = None,
+    executor: Any = None,
+    wait_cap: float = 10.0,
 ) -> None:
     existing = (
         await session.execute(select(OperatorAccount))
@@ -133,7 +137,21 @@ async def setup_account(
         raise AppError("unauthorized", "authentication failed")
     import asyncio
 
-    phc = await asyncio.to_thread(hash_password, password)  # keep the loop free
+    loop = asyncio.get_running_loop()
+    if semaphore is not None:
+        try:
+            await asyncio.wait_for(semaphore.acquire(), timeout=wait_cap)
+        except TimeoutError:
+            raise AppError("rate_limited", "authentication busy",
+                           headers={"Retry-After": "1"}) from None
+    try:
+        if executor is not None:
+            phc = await loop.run_in_executor(executor, hash_password, password)
+        else:
+            phc = await asyncio.to_thread(hash_password, password)
+    finally:
+        if semaphore is not None:
+            semaphore.release()
     session.add(OperatorAccount(id=1, username=username, password_hash=phc))
     try:
         await session.flush()

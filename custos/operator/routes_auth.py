@@ -320,7 +320,7 @@ async def device_approve(
 
     async with request.app.state.session_maker() as session:
         try:
-            transfer = await approve_device(session, sess, code)
+            transfer, deadline = await approve_device(session, sess, code)
         except AppError:
             await record_audit(
                 request.app.state.session_maker, actor_kind="operator_session",
@@ -336,7 +336,7 @@ async def device_approve(
         actor_id=str(sess.id), actor_label="operator", action="device.login",
         item_name=None, ok=True, detail={"stage": "approve"},
     )
-    return {"transfer_code": transfer}
+    return {"transfer_code": transfer, "exchange_deadline": deadline.isoformat()}
 
 
 @router.post("/device-exchange")
@@ -445,11 +445,18 @@ async def password_change_route(
     request: Request, response: Response,
     sess: OperatorSession = Depends(require_session),
 ) -> dict[str, Any]:
+    from custos.operator.lockout import check_lockout
+    from custos.operator.login import resolve_client
     from custos.operator.recovery import change_password
     from custos.operator.sessions import set_session_cookie
     from custos.operator.stepup import consume_step_up
     from custos.routes_agent import _json_body
 
+    ip0, peer0 = resolve_client(request, request.app.state.settings)
+    async with request.app.state.session_maker() as session:
+        await check_lockout(session, ip=ip0, account_exists=True,
+                            counter=request.app.state.failure_counter)
+    request.app.state.rate_limiter.check_unauth(ip0)
     # full sessions require a step-up token; recovery_reset is waived (it
     # re-verifies current_password in the body, §5)
     if sess.purpose != "recovery_reset":
@@ -476,6 +483,9 @@ async def password_change_route(
         try:
             promoted, fresh_codes, cookie = await change_password(
                 session, row, current=current, new=new, pepper=settings.pepper_raw,
+                semaphore=request.app.state.auth_semaphore,
+                executor=request.app.state.auth_executor,
+                wait_cap=getattr(request.app.state, "auth_wait_cap", 10.0),
             )
         except AppError as exc:
             if exc.code == "unauthorized":
@@ -507,6 +517,9 @@ async def password_change_route(
     result: dict[str, Any] = {"password": "changed"}
     if fresh_codes:
         result["recovery_codes"] = fresh_codes
+    if cookie:
+        # full-session replacement: hand the console the new csrf token
+        result["csrf_token"] = promoted.csrf_token
     return result
 
 
@@ -555,10 +568,12 @@ async def totp_confirm(
     if not isinstance(code, str):
         raise AppError("invalid", "code is required")
     async with request.app.state.session_maker() as session:
-        await confirm_totp(session, request.app.state.vault, code)
+        codes = await confirm_totp(
+            session, request.app.state.vault, code, request.app.state.settings.pepper_raw
+        )
         await session.commit()
     await _totp_audit(request, sess, "confirm")
-    return {"totp": "enabled"}
+    return {"totp": "enabled", "recovery_codes": codes}
 
 
 @router.post("/totp/disable")
@@ -708,6 +723,9 @@ async def setup(request: Request) -> dict[str, Any]:
             expected_code=expected, ip=ip, peer_ip=peer,
             budget=request.app.state.ledger_budget,
             counter=request.app.state.failure_counter,
+            semaphore=request.app.state.auth_semaphore,
+            executor=request.app.state.auth_executor,
+            wait_cap=getattr(request.app.state, "auth_wait_cap", 10.0),
         )
         await session.commit()
     # durable now: consume the code and record success

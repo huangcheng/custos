@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import secrets
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,9 +64,9 @@ async def consume_code(session: AsyncSession, pepper: bytes, presented: str) -> 
     )
     matched_id = None
     for row in rows:
+        # compare every row (no early exit) so the match position is not leaked
         if digests_equal(row.digest, target):
             matched_id = row.id
-            break
     if matched_id is None:
         return False
     result = await session.execute(
@@ -83,13 +84,31 @@ async def change_password(
     current: str,
     new: str,
     pepper: bytes,
+    semaphore: Any = None,
+    executor: Any = None,
+    wait_cap: float = 10.0,
 ) -> tuple[OperatorSession, list[str], str]:
     import asyncio
 
     acct = (
         await session.execute(select(OperatorAccount).where(OperatorAccount.id == 1))
     ).scalar_one()
-    if not await asyncio.to_thread(verify_password, acct.password_hash, current):
+    loop = asyncio.get_running_loop()
+    if semaphore is not None:
+        try:
+            await asyncio.wait_for(semaphore.acquire(), timeout=wait_cap)
+        except TimeoutError:
+            raise AppError("rate_limited", "authentication busy",
+                           headers={"Retry-After": "1"}) from None
+    try:
+        if executor is not None:
+            ok = await loop.run_in_executor(executor, verify_password, acct.password_hash, current)
+        else:
+            ok = await asyncio.to_thread(verify_password, acct.password_hash, current)
+    finally:
+        if semaphore is not None:
+            semaphore.release()
+    if not ok:
         raise AppError("unauthorized", "authentication failed")
     validate_password(new)
     acct.password_hash = await asyncio.to_thread(hash_password, new)

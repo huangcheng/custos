@@ -54,7 +54,7 @@ async def test_mint_lookup_approve_exchange(env4) -> None:
         assert info["client_ip"] == "203.0.113.1"
     async with maker() as s:
         row = await s.get(OperatorSession, sess.id)
-        transfer = await approve_device(s, row, code)
+        transfer, _deadline = await approve_device(s, row, code)
         await s.commit()
     async with maker() as s:
         sess_row, cookie = await exchange_device(s, maker, code, transfer)
@@ -88,7 +88,7 @@ async def test_exchange_attempt_cap(env4) -> None:
     sess = await _session(maker)
     async with maker() as s:
         row = await s.get(OperatorSession, sess.id)
-        transfer = await approve_device(s, row, code)
+        transfer, _deadline = await approve_device(s, row, code)
         await s.commit()
     for _ in range(5):
         async with maker() as s:
@@ -138,7 +138,7 @@ async def test_cross_row_codes_rejected(env4) -> None:
     sess = await _session(maker)
     async with maker() as s:
         row = await s.get(OperatorSession, sess.id)
-        transfer_b = await approve_device(s, row, code_b)
+        transfer_b, _ = await approve_device(s, row, code_b)
         await s.commit()
     async with maker() as s:
         with pytest.raises(AppError):
@@ -153,7 +153,7 @@ async def test_correct_after_four_wrong_then_dead(env4) -> None:
     sess = await _session(maker)
     async with maker() as s:
         row = await s.get(OperatorSession, sess.id)
-        transfer = await approve_device(s, row, code)
+        transfer, _deadline = await approve_device(s, row, code)
         await s.commit()
     for _ in range(4):
         async with maker() as s:
@@ -195,7 +195,7 @@ async def test_transfer_window_clamped(env4) -> None:
     sess = await _session(maker)
     async with maker() as s:
         row = await s.get(OperatorSession, sess.id)
-        transfer = await approve_device(s, row, code)
+        transfer, _deadline = await approve_device(s, row, code)
         await s.commit()
     # push approved_at back beyond the 2-min transfer window (device expiry
     # was extended to now+2min at approval, so set both back)

@@ -73,7 +73,9 @@ async def lookup_device(session: AsyncSession, code: str) -> dict[str, Any]:
             "expires_at": row.expires_at.isoformat()}
 
 
-async def approve_device(session: AsyncSession, sess: OperatorSession, code: str) -> str:
+async def approve_device(
+    session: AsyncSession, sess: OperatorSession, code: str
+) -> tuple[str, datetime]:
     row = (
         await session.execute(select(DeviceCode).where(DeviceCode.code_hash == _hash(code)))
     ).scalar_one_or_none()
@@ -92,7 +94,8 @@ async def approve_device(session: AsyncSession, sess: OperatorSession, code: str
     )
     if result.rowcount != 1:  # type: ignore[attr-defined]
         raise AppError("conflict", "device already approved")
-    return transfer
+    deadline = now + timedelta(seconds=_TRANSFER_TTL)
+    return transfer, deadline
 
 
 async def exchange_device(

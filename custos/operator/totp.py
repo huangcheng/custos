@@ -37,6 +37,10 @@ async def begin_totp_setup(session: AsyncSession, vault: Vault) -> tuple[str, st
     acct = (
         await session.execute(select(OperatorAccount).where(OperatorAccount.id == 1))
     ).scalar_one()
+    if acct.totp_enabled:
+        # re-opening setup must not silently downgrade an enabled factor;
+        # disable explicitly first (§5)
+        raise AppError("conflict", "totp already enabled; disable it first")
     secret = pyotp.random_base32()
     blob, version = vault.seal("operator:totp", "", secret.encode())
     acct.totp_secret = blob
@@ -46,7 +50,9 @@ async def begin_totp_setup(session: AsyncSession, vault: Vault) -> tuple[str, st
     return secret, uri
 
 
-async def confirm_totp(session: AsyncSession, vault: Vault, code: str) -> None:
+async def confirm_totp(
+    session: AsyncSession, vault: Vault, code: str, pepper: bytes | None = None
+) -> list[str]:
     # confirm is a verification site too: guarded monotonic replay counter
     if not await verify_totp(session, vault, code, site="confirm"):
         raise AppError("invalid", "totp code rejected")
@@ -54,6 +60,12 @@ async def confirm_totp(session: AsyncSession, vault: Vault, code: str) -> None:
         await session.execute(select(OperatorAccount).where(OperatorAccount.id == 1))
     ).scalar_one()
     acct.totp_enabled = True
+    # 10 recovery codes issued at enable (§5)
+    if pepper is not None:
+        from custos.operator.recovery import issue_codes
+
+        return await issue_codes(session, pepper)
+    return []
 
 
 async def disable_totp(session: AsyncSession) -> None:

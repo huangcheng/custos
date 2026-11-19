@@ -35,6 +35,9 @@ async def env(pg_db: str):
         acct.totp_last_step_confirm = 0
         acct.totp_last_step_login = 0
         acct.totp_last_step_stepup = 0
+        acct.totp_enabled = False
+        acct.totp_secret = None
+        acct.totp_key_version = None
         from sqlalchemy import delete
 
         from custos.db.models import AuthEvent
@@ -71,7 +74,6 @@ async def test_setup_confirm_activates(env) -> None:
         acct = (await s.execute(select(OperatorAccount))).scalar_one()
         assert acct.totp_enabled
         assert acct.totp_secret is not None
-        assert "otpauth://" in (await begin_totp_setup(s, vault))[1] or True
 
 
 async def test_replay_same_site_rejected(env) -> None:
@@ -264,3 +266,28 @@ async def test_confirm_replay_rejected(env) -> None:
     async with maker() as s:
         with pytest.raises(AppError):
             await confirm_totp(s, vault, code)
+
+
+async def test_confirm_issues_recovery_codes(totp_http) -> None:
+    async with totp_http() as (client, maker, csrf, app):
+        su = await client.post("/api/auth/step-up", headers={"x-csrf-token": csrf},
+                               json={"password": "cu-test-password-12ch"})
+        h = {"x-csrf-token": csrf, "x-step-up-token": su.json()["step_up_token"]}
+        r = await client.post("/api/auth/totp/setup", headers=h, json={})
+        secret = r.json()["secret"]
+        su2 = await client.post("/api/auth/step-up", headers={"x-csrf-token": csrf},
+                                json={"password": "cu-test-password-12ch"})
+        h2 = {"x-csrf-token": csrf, "x-step-up-token": su2.json()["step_up_token"]}
+        r2 = await client.post("/api/auth/totp/confirm", headers=h2,
+                               json={"code": pyotp.TOTP(secret).now()})
+        assert r2.status_code == 200
+        assert len(r2.json()["recovery_codes"]) == 10
+
+
+async def test_setup_does_not_disable_existing_totp(env) -> None:
+    maker, vault = env
+    await _enable(maker, vault)
+    # re-open setup while enabled: must NOT silently downgrade to password-only
+    async with maker() as s:
+        with pytest.raises(AppError):
+            await begin_totp_setup(s, vault)

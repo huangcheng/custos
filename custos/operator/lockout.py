@@ -90,6 +90,7 @@ async def check_lockout(
                     AuthEvent.ts > ip_floor,
                 )
                 .order_by(AuthEvent.ts)
+                .limit(_IP_THRESHOLD)
             )
         ).scalars()
     )
