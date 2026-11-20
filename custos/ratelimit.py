@@ -20,10 +20,12 @@ class RateLimiter:
         agent_requests_per_min: int = 120,
         agent_concurrent: int = 8,
         failed_auth_per_min: int = 30,
+        admin_requests_per_min: int = 300,
     ) -> None:
         self._req_limit = agent_requests_per_min
         self._conc_limit = agent_concurrent
         self._fail_limit = failed_auth_per_min
+        self._admin_limit = admin_requests_per_min
         self._requests: dict[str, deque[float]] = {}
         self._failures: dict[str, deque[float]] = {}
         self._inflight: dict[str, int] = {}
@@ -70,6 +72,10 @@ class RateLimiter:
 
     def check_agent_request(self, key_id: str) -> None:
         self._bucket(self._requests, key_id, self._req_limit)
+
+    def check_admin_request(self, key: str) -> None:
+        """Admin plane: 300 req/min per session-or-token (§5)."""
+        self._bucket(self._requests, key, self._admin_limit)
 
     def record_failed_auth(self, ip: str) -> None:
         """Record a verified failure without raising; the gate 429s the next try."""

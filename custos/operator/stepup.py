@@ -18,7 +18,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from custos.audit import FailureCounter, LedgerBudget, record_auth_event
-from custos.db.models import OperatorAccount, OperatorSession, StepUpToken
+from custos.db.models import OperatorAccount, OperatorSession, OperatorToken, StepUpToken
 from custos.errors import AppError
 from custos.operator.account import verify_password
 
@@ -125,24 +125,48 @@ async def mint_step_up(
     return token
 
 
-async def consume_step_up(
-    session: AsyncSession, token: str, presenter: OperatorSession
+async def _load_valid_single(
+    session: AsyncSession, token: str, presenter: OperatorSession | OperatorToken | None
 ) -> StepUpToken:
+    if presenter is None:
+        raise AppError("step_up_required", "step-up required")
     row = (
         await session.execute(
             select(StepUpToken).where(StepUpToken.nonce_hash == _hash(token))
         )
     ).scalar_one_or_none()
     now = datetime.now(UTC)
+    if isinstance(presenter, OperatorToken):
+        bound = row is not None and row.operator_token_id == presenter.id
+        live = presenter.revoked_at is None and presenter.expires_at > now
+    else:
+        bound = row is not None and row.session_id == presenter.id
+        live = presenter.revoked_at is None
     if (
         row is None
         or row.kind != "single"
         or row.consumed_at is not None
         or row.expires_at <= now
-        or row.session_id != presenter.id
-        or presenter.revoked_at is not None
+        or not bound
+        or not live
     ):
         raise AppError("step_up_required", "step-up required")
+    return row
+
+
+async def peek_single(
+    session: AsyncSession, token: str, presenter: OperatorSession | OperatorToken | None
+) -> StepUpToken:
+    """Validate WITHOUT consuming — the admin write pre-gate must not burn
+    a token on a request that is about to be rejected."""
+    return await _load_valid_single(session, token, presenter)
+
+
+async def consume_step_up(
+    session: AsyncSession, token: str, presenter: OperatorSession | OperatorToken | None
+) -> StepUpToken:
+    row = await _load_valid_single(session, token, presenter)
+    now = datetime.now(UTC)
     result = await session.execute(
         update(StepUpToken)
         .where(StepUpToken.id == row.id, StepUpToken.consumed_at.is_(None))
@@ -155,7 +179,8 @@ async def consume_step_up(
 
 def require_step_up(action: str) -> Any:
     """Dependency factory: consume a single-use step-up token bound to the
-    presenting session. `allow_sensitive` token substitution arrives in plan 3.
+    presenting session. Admin-plane gates (session-or-token) live in
+    custos.admin.auth; this factory stays session-only for /api/auth routes.
 
     Note: annotations must resolve from module globals (this module uses
     `from __future__ import annotations`), so Request is imported at top.

@@ -196,6 +196,10 @@ def check_purpose(request: Request | Any, sess: OperatorSession) -> None:
     if sess.purpose != "recovery_reset":
         return
     path = request.url.path
+    if path == "/api/admin" or path.startswith("/api/admin/"):
+        # §5 invariant: recovery sessions NEVER reach the admin plane — pinned
+        # here explicitly so a future allowlist edit cannot open it silently
+        raise AppError("purpose_denied", "session purpose does not allow this route")
     if not any(
         path == allowed or path.startswith(allowed + "/") for allowed in _RECOVERY_RESET_ALLOWED
     ):

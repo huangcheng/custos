@@ -229,11 +229,13 @@ def create_app(settings: Settings) -> FastAPI:
     install_telemetry()
     instrument_fastapi(app)  # before any add_middleware / first request
 
+    from custos.admin.auth import router as admin_auth_router
     from custos.operator.routes_auth import router as auth_router
     from custos.routes_agent import router as agent_router
 
     app.include_router(agent_router)
     app.include_router(auth_router)
+    app.include_router(admin_auth_router)
 
     class _MCPDispatch:
         """Route /mcp to the Streamable HTTP sub-app (auth middleware intact)."""

@@ -1,7 +1,7 @@
 """Audit + auth-event ledger contract tests (design §4, §5 ledger budget)."""
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from custos.audit import (
@@ -21,7 +21,13 @@ pytestmark = pytest.mark.usefixtures("pg_db")
 @pytest.fixture
 async def maker(pg_db: str):
     engine = create_async_engine(pg_db)
-    yield async_sessionmaker(engine, expire_on_commit=False)
+    maker_ = async_sessionmaker(engine, expire_on_commit=False)
+    # shared session-scoped DB: earlier files may leave audit/auth rows behind
+    async with maker_() as s:
+        await s.execute(delete(AuditRow))
+        await s.execute(delete(AuthEvent))
+        await s.commit()
+    yield maker_
     await engine.dispose()
 
 
