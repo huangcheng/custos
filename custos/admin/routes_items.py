@@ -10,13 +10,15 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from custos.admin.auth import AdminPrincipal, require_admin, require_sensitive
+from custos.admin.auth import AdminPrincipal, require_admin, require_sensitive, require_session_only
 from custos.admin.items import (
     _sensitive_detail,
     admin_env,
     history_list,
     history_reveal,
     masked_get,
+    purge,
+    restore,
     reveal,
 )
 from custos.errors import AppError
@@ -221,5 +223,30 @@ async def delete_one(
     async with request.app.state.session_maker() as session:
         await soft_delete(session, request.app.state.session_maker,
                           request.app.state.vault, p, name)
+        await session.commit()
+    return Response(status_code=204)
+
+
+@router.post("/items/{name}/restore")
+async def restore_one(
+    name: str, request: Request, response: Response,
+    p: AdminPrincipal = Depends(require_sensitive),
+) -> dict[str, Any]:
+    async with request.app.state.session_maker() as session:
+        result = await restore(
+            session, p, name, _sensitive_detail(request.state),
+        )
+        await session.commit()
+    _etag(response, result["revision"])
+    return result
+
+
+@router.delete("/items/{name}/purge", status_code=204)
+async def purge_one(
+    name: str, request: Request,
+    p: AdminPrincipal = Depends(require_session_only),
+) -> Response:
+    async with request.app.state.session_maker() as session:
+        await purge(session, p, name)
         await session.commit()
     return Response(status_code=204)

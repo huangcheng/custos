@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import delete, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from custos.admin.auth import AdminPrincipal
@@ -238,3 +238,88 @@ async def history_reveal(
         "value": value,
         "superseded_at": snap.superseded_at.isoformat(),
     }
+
+
+async def restore(
+    session: AsyncSession,
+    p: AdminPrincipal,
+    name: str,
+    detail: dict[str, object],
+) -> dict[str, Any]:
+    """Metadata-only (§4): clears deleted_at, bumps revision. Works on
+    unreadable items — no decryption, no cap measurement."""
+    item = (
+        await session.execute(
+            select(Item).where(Item.name == name).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if item is None:
+        raise _not_found()
+    if item.deleted_at is None:
+        raise AppError("conflict", "item is not deleted")
+    pre_revision = item.revision
+    item.deleted_at = None
+    item.revision += 1
+    await session.flush()
+    from custos.items import _audit_write
+
+    await _audit_write(session, p, "restore", item, pre_revision, [], dict(detail))
+    rows = list(
+        (await session.execute(select(Field).where(Field.item_id == item.id))).scalars()
+    )
+    return {
+        "name": item.name,
+        "notes": item.notes,
+        "revision": item.revision,
+        "deleted": False,
+        "fields": [
+            {"name": f.name, "secret": True} if f.secret
+            else {"name": f.name, "secret": False, "value": f.value}
+            for f in sorted(rows, key=lambda r: r.name)
+        ],
+    }
+
+
+async def purge(
+    session: AsyncSession,
+    p: AdminPrincipal,
+    name: str,
+) -> None:
+    """Hard-delete in one transaction, order pinned by §4: history rows
+    first, then fields, then the item row (no FK cascade reliance). The
+    success audit commits WITH the deletion — a rolled-back purge leaves
+    no ok:true row."""
+    from custos.audit import _validate_actor, _validate_detail
+    from custos.db.models import AuditRow
+
+    # engine-level operator guard (mirrors force_drop): purge is session-only
+    if p.actor_kind != "operator_session":
+        raise AppError("session_required", "purge is session-only")
+    _validate_actor(p.actor_kind, p.actor_id)
+    item = (
+        await session.execute(
+            select(Item).where(Item.name == name).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if item is None:
+        raise _not_found()
+    hist = await session.execute(
+        delete(FieldHistory).where(FieldHistory.item_id == item.id)
+    )
+    flds = await session.execute(delete(Field).where(Field.item_id == item.id))
+    await session.delete(item)
+    await session.flush()
+    total = int(hist.rowcount) + int(flds.rowcount) + 1  # type: ignore[attr-defined]
+    detail: dict[str, object] = {"count": total}
+    _validate_detail(detail)
+    session.add(
+        AuditRow(
+            actor_kind=p.actor_kind,
+            actor_id=p.actor_id,
+            actor_label=p.actor_label,
+            action="purge",
+            item_name=name,
+            ok=True,
+            detail=detail,
+        )
+    )
