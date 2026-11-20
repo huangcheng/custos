@@ -13,9 +13,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from custos.app import create_app
 from custos.config import load_settings
 from custos.db.models import (
+    AgentKey,
     AuditRow,
     AuthEvent,
     DeviceCode,
+    Field,
+    FieldHistory,
+    Item,
     LockoutSuppression,
     OperatorAccount,
     OperatorSession,
@@ -97,6 +101,10 @@ def admin_stack(pg_db: str):
                         await s.execute(delete(AuthEvent))
                         await s.execute(delete(LockoutSuppression))
                         await s.execute(delete(AuditRow))
+                        await s.execute(delete(FieldHistory))
+                        await s.execute(delete(Field))
+                        await s.execute(delete(Item))
+                        await s.execute(delete(AgentKey))
                         await s.commit()
                     await engine.dispose()
 

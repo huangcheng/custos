@@ -273,6 +273,7 @@ async def _audit_write(
     item: Item,
     pre_revision: int,
     evicted_ids: list[str],
+    extra_detail: dict[str, Any] | None = None,
 ) -> None:
     """Success audits commit WITH the write (a rolled-back write leaves no
     ok:true row). Failure audits stay independent per §4."""
@@ -286,6 +287,11 @@ async def _audit_write(
     }
     if evicted_ids:
         detail["evicted_ids"] = evicted_ids[:64]
+    if extra_detail:
+        reserved = {"pre_revision", "revision", "evicted", "evicted_ids"}
+        if reserved & extra_detail.keys():
+            raise ValueError("extra_detail must not overwrite reserved audit keys")
+        detail.update(extra_detail)
     if action not in ACTION_ENUM:
         raise ValueError(f"audit action {action!r} is not in the closed enum")
     actor_kind = getattr(p, "actor_kind", "agent")
@@ -306,12 +312,20 @@ async def _audit_write(
     )
 
 
-def _response(item: Item, supplied: dict[str, dict[str, Any]], notes: str) -> dict[str, Any]:
+def _response(
+    item: Item, supplied: dict[str, dict[str, Any]], notes: str, mask: bool = False
+) -> dict[str, Any]:
+    fields = sorted(supplied.values(), key=lambda f: f["name"])
+    if mask:
+        # §6/§11: admin write responses never carry secret values or kept echoes
+        fields = [
+            {"name": f["name"], "secret": True} if f["secret"] else f for f in fields
+        ]
     return {
         "name": item.name,
         "notes": notes,
         "revision": item.revision,
-        "fields": sorted(supplied.values(), key=lambda f: f["name"]),
+        "fields": fields,
         "created": False,
     }
 
@@ -322,6 +336,7 @@ async def create_item(
     vault: Vault,
     p: Principal,
     body: dict[str, Any],
+    mask: bool = False,
 ) -> dict[str, Any]:
     raw_name = body.get("name")
     if isinstance(raw_name, str):
@@ -350,7 +365,7 @@ async def create_item(
         supplied[view.name] = {"name": view.name, "secret": view.secret, "value": view.value}
     await session.flush()
     await _audit_write(session, p, "create", item, 0, [])
-    resp = _response(item, supplied, notes)
+    resp = _response(item, supplied, notes, mask=mask)
     resp["created"] = True
     return resp
 
@@ -361,12 +376,13 @@ async def get_item(
     vault: Vault,
     p: Principal,
     name: str,
+    include_deleted: bool = False,
 ) -> dict[str, Any]:
     _check_scope(p, name)
     item = (
         await session.execute(select(Item).where(Item.name == name))
     ).scalar_one_or_none()
-    if item is None or item.deleted_at is not None:
+    if item is None or (item.deleted_at is not None and not include_deleted):
         raise _not_found()
     fields = await _load_fields(session, item.id)
     views = _decrypt_views(vault, fields)
@@ -390,6 +406,8 @@ async def put_item(
     body: dict[str, Any],
     if_match: str | None = None,
     upsert: bool = False,
+    mask: bool = False,
+    allow_downgrade: bool = False,
 ) -> dict[str, Any]:
     _check_scope(p, name)
     _check_write_mode(p)
@@ -401,7 +419,7 @@ async def put_item(
             raise AppError("conflict", "If-Match on a missing name")
         # validate the PUT-shaped body before the create branch runs
         plan_put_ops(name, body, {})
-        return await create_item(session, maker, vault, p, {**body, "name": name})
+        return await create_item(session, maker, vault, p, {**body, "name": name}, mask=mask)
     if item.deleted_at is not None:
         raise AppError("conflict", "name is soft-deleted") if upsert else _not_found()
     _check_if_match(item, if_match)
@@ -410,7 +428,9 @@ async def put_item(
     try:
         ops = plan_put_ops(name, body, views)
     except DowngradeError:
-        raise AppError("secret_downgrade_denied", "secret downgrade refused") from None
+        if not allow_downgrade:
+            raise AppError("secret_downgrade_denied", "secret downgrade refused") from None
+        ops = plan_put_ops(name, body, views, allow_downgrade=True)
     notes = body["notes"]
     post = _materialize_post(views, ops)
     check_caps(name, notes, list(post.values()))
@@ -419,8 +439,13 @@ async def put_item(
     item.notes = notes
     item.revision += 1
     await session.flush()
-    await _audit_write(session, p, "put", item, pre_revision, evicted)
-    return _response(item, supplied, notes)
+    await _audit_write(
+        session, p, "put", item, pre_revision, evicted,
+        {"allow_sensitive": True}
+        if allow_downgrade and getattr(p, "allow_sensitive", False)
+        else None,
+    )
+    return _response(item, supplied, notes, mask=mask)
 
 
 async def patch_item(
@@ -431,6 +456,8 @@ async def patch_item(
     name: str,
     body: dict[str, Any],
     if_match: str | None = None,
+    mask: bool = False,
+    allow_downgrade: bool = False,
 ) -> dict[str, Any]:
     _check_scope(p, name)
     _check_write_mode(p)
@@ -443,7 +470,9 @@ async def patch_item(
     try:
         ops = plan_patch_ops(body, views, path_name=name)
     except DowngradeError:
-        raise AppError("secret_downgrade_denied", "secret downgrade refused") from None
+        if not allow_downgrade:
+            raise AppError("secret_downgrade_denied", "secret downgrade refused") from None
+        ops = plan_patch_ops(body, views, path_name=name, allow_downgrade=True)
     new_notes = item.notes if "notes" not in body else (body["notes"] or "")
     post = _materialize_post(views, ops)
     check_caps(name, new_notes, list(post.values()))
@@ -460,8 +489,13 @@ async def patch_item(
     item.notes = new_notes
     item.revision += 1
     await session.flush()
-    await _audit_write(session, p, "patch", item, pre_revision, evicted)
-    return _response(item, supplied, new_notes)
+    await _audit_write(
+        session, p, "patch", item, pre_revision, evicted,
+        {"allow_sensitive": True}
+        if allow_downgrade and getattr(p, "allow_sensitive", False)
+        else None,
+    )
+    return _response(item, supplied, new_notes, mask=mask)
 
 
 async def soft_delete(

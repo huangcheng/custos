@@ -147,7 +147,10 @@ def _classify_downgrades(
 
 
 def plan_put_ops(
-    path_name: str, body: dict[str, Any], existing: dict[str, FieldView]
+    path_name: str,
+    body: dict[str, Any],
+    existing: dict[str, FieldView],
+    allow_downgrade: bool = False,
 ) -> list[Op]:
     body_name = body.get("name")
     if body_name is not None and body_name != path_name:
@@ -188,7 +191,8 @@ def plan_put_ops(
     for fname in existing:
         if fname not in seen:
             ops.append(Op(kind="remove", name=fname))
-    _classify_downgrades(existing, post)
+    if not allow_downgrade:
+        _classify_downgrades(existing, post)
     return ops
 
 
@@ -196,6 +200,7 @@ def plan_patch_ops(
     body: dict[str, Any],
     existing: dict[str, FieldView],
     path_name: str | None = None,
+    allow_downgrade: bool = False,
 ) -> list[Op]:
     body_name = body.get("name")
     if body_name is not None and path_name is not None and body_name != path_name:
@@ -270,5 +275,6 @@ def plan_patch_ops(
             else:
                 raise _invalid("omitted value is only valid for an existing secret field")
     post = {k: v for k, v in state.items() if v is not None}
-    _classify_downgrades(existing, post)
+    if not allow_downgrade:
+        _classify_downgrades(existing, post)
     return ops

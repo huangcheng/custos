@@ -30,12 +30,12 @@ def _escape(value: str) -> str:
     return "'" + value.replace("'", "'\\''") + "'"
 
 
-def env_lines(fields: list[FieldView]) -> str:
-    """Agent-plane export: hazardous names are ALWAYS refused. The admin
-    override (plan 2) will add its own gated entry point, not a silent flag."""
+def env_lines(fields: list[FieldView], allow_hazardous: bool = False) -> str:
+    """Hazardous names are refused unless the ADMIN plane explicitly overrides
+    (step-up/allow_sensitive gated at the route; agent plane never passes True)."""
     lines: list[str] = []
     for f in sorted(fields, key=lambda f: f.name):
-        if _hazardous(f.name):
+        if _hazardous(f.name) and not allow_hazardous:
             lines.append(f"# refused hazardous name: {f.name}")
         else:
             lines.append(f"export {f.name}={_escape(f.value)}")

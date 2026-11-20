@@ -20,6 +20,7 @@ from custos.db.models import Field, Item
 from custos.envexport import env_lines
 from custos.errors import AppError
 from custos.items import (
+    Principal,
     create_item,
     get_item,
     patch_item,
@@ -96,23 +97,29 @@ def _etag(response: Response, revision: int) -> None:
     response.headers["ETag"] = f'"{revision}"'
 
 
-def _list_row(item: Item, fields: list[tuple[str, bool]]) -> dict[str, Any]:
-    return {
+def _list_row(
+    item: Item, fields: list[tuple[str, bool]], include_deleted: bool = False
+) -> dict[str, Any]:
+    row = {
         "name": item.name,
         "notes": item.notes[:256],
         "revision": item.revision,
         "updated_at": item.updated_at.isoformat(),
         "fields": [{"name": n, "secret": s} for n, s in sorted(fields)],
     }
+    if include_deleted:
+        row["deleted"] = item.deleted_at is not None
+    return row
 
 
 async def list_via_engine(
     state: Any,
-    key: AgentPrincipal,
+    key: Principal,
     endpoint: str,
     cursor: str | None = None,
     limit: int = 50,
     q: str | None = None,
+    include_deleted: bool = False,
 ) -> dict[str, Any]:
     """Shared by REST list/search and the MCP tools — one implementation."""
     session_maker = state.session_maker
@@ -121,10 +128,12 @@ async def list_via_engine(
     search = q
     cursor_payload: dict[str, Any] = {}
     if cursor is not None:
-        cursor_payload = read_cursor(cursor, pepper, endpoint, key.key_id)
+        cursor_payload = read_cursor(cursor, pepper, endpoint, key.actor_id)
     async with session_maker() as session:
         # scan narrow columns only: notes/blobs never loaded for scope checks
-        stmt = select(Item.id, Item.name).where(Item.deleted_at.is_(None)).order_by(Item.name)
+        stmt = select(Item.id, Item.name).order_by(Item.name)
+        if not include_deleted:
+            stmt = stmt.where(Item.deleted_at.is_(None))
         if "after" in cursor_payload:
             stmt = stmt.where(Item.name > cursor_payload["after"])
         if search is not None:
@@ -177,10 +186,11 @@ async def list_via_engine(
             ids = [i[0] for i in visible]
             for item in (
                 await session.execute(
-                    select(Item).where(Item.id.in_(ids), Item.deleted_at.is_(None))
+                    select(Item).where(Item.id.in_(ids))
                 )
             ).scalars():
-                items_by_id[item.id] = item
+                if include_deleted or item.deleted_at is None:
+                    items_by_id[item.id] = item
             # metadata columns only — never ciphertext/value blobs on list paths
             for item_id, fname, fsecret in (
                 await session.execute(
@@ -192,14 +202,14 @@ async def list_via_engine(
                 fields_by_item.setdefault(item_id, []).append((fname, fsecret))
     next_cursor = None
     if has_more and last_visible is not None:
-        next_cursor = mint_cursor({"after": last_visible}, pepper, endpoint, key.key_id)
+        next_cursor = mint_cursor({"after": last_visible}, pepper, endpoint, key.actor_id)
     elif not scan_exhausted and offset_name is not None:
         # scan budget hit with nothing visible: resume from the scan edge so
         # the caller can always make progress through out-of-scope stretches
-        next_cursor = mint_cursor({"after": offset_name}, pepper, endpoint, key.key_id)
+        next_cursor = mint_cursor({"after": offset_name}, pepper, endpoint, key.actor_id)
     result = {
         "items": [
-            _list_row(items_by_id[i[0]], fields_by_item.get(i[0], []))
+            _list_row(items_by_id[i[0]], fields_by_item.get(i[0], []), include_deleted)
             for i in visible
             if i[0] in items_by_id  # soft-deleted between scan and hydrate
         ],

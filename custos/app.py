@@ -230,12 +230,14 @@ def create_app(settings: Settings) -> FastAPI:
     instrument_fastapi(app)  # before any add_middleware / first request
 
     from custos.admin.auth import router as admin_auth_router
+    from custos.admin.routes_items import router as admin_items_router
     from custos.operator.routes_auth import router as auth_router
     from custos.routes_agent import router as agent_router
 
     app.include_router(agent_router)
     app.include_router(auth_router)
     app.include_router(admin_auth_router)
+    app.include_router(admin_items_router)
 
     class _MCPDispatch:
         """Route /mcp to the Streamable HTTP sub-app (auth middleware intact)."""
