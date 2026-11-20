@@ -233,3 +233,23 @@ async def test_admin_principal_satisfies_engine_protocol(admin_stack) -> None:
         assert p.actor_kind == "operator_token" and len(p.actor_id) == 12
         assert p.plane == p.key_id
         await client.get("/api/admin/ping", headers=bearer(co))
+
+
+async def test_admin_write_requires_csrf(admin_stack) -> None:
+    """Regression: an admin mutation without x-csrf-token must be rejected
+    (require_admin delegates to require_session's CSRF guard)."""
+    async with admin_stack() as (client, maker, h):
+        await h["login"](client)
+        r = await client.post("/api/admin/items",
+                              json={"name": "csrf-x", "notes": "", "fields": []})
+        assert r.status_code == 401
+        r = await client.delete("/api/admin/items/csrf-x")
+        assert r.status_code == 401
+        async with maker() as s:
+            from sqlalchemy import func
+            from sqlalchemy import select as sel
+
+            from custos.db.models import Item
+
+            assert (await s.execute(sel(func.count()).select_from(Item)
+                                    .where(Item.name == "csrf-x"))).scalar_one() == 0

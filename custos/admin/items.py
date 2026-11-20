@@ -126,10 +126,13 @@ async def admin_env(
         raise
     views = [FieldView(f["name"], f["secret"], f["value"]) for f in result["fields"]]
     output = env_lines(views, allow_hazardous=allow_hazardous)
+    audit_detail: dict[str, object] = dict(detail)
+    if allow_hazardous:
+        audit_detail["allow_hazardous"] = True
     await record_audit(
         maker,
         actor_kind=p.actor_kind, actor_id=p.actor_id, actor_label=p.actor_label,
-        action="env", item_name=name, ok=True, detail=detail,
+        action="env", item_name=name, ok=True, detail=audit_detail,
     )
     return output
 
@@ -208,6 +211,18 @@ def _open_snapshot(vault: Vault, snap: FieldHistory) -> str:
     return snap.value
 
 
+def detail_with_snapshot(
+    snap: FieldHistory, detail: dict[str, object]
+) -> dict[str, object]:
+    """§6: audit records the snapshot's actual id/field/superseded_at, and
+    keeps the caller's allow_sensitive marking."""
+    return {
+        **detail,
+        "count": 1,
+        "reason": f"snapshot:{snap.id}:{snap.name}:{snap.superseded_at.isoformat()}",
+    }
+
+
 async def history_reveal(
     session: AsyncSession,
     maker: async_sessionmaker[AsyncSession],
@@ -229,7 +244,7 @@ async def history_reveal(
     await record_audit(
         maker,
         actor_kind=p.actor_kind, actor_id=p.actor_id, actor_label=p.actor_label,
-        action="reveal", item_name=item.name, ok=True, detail={**detail, "count": 1},
+        action="reveal", item_name=item.name, ok=True, detail=detail_with_snapshot(snap, detail),
     )
     return {
         "id": str(snap.id),

@@ -133,7 +133,7 @@ async def test_batch_cursor_and_termination_with_unreadable(admin_stack) -> None
 
 async def test_run_token_lifecycle(admin_stack) -> None:
     async with admin_stack(keyring=RING2) as (client, maker, h):
-        await _seed_old(maker, 250)
+        await _seed_old(maker, 450)  # 3 batches: 200 / 200 / 50
         csrf = await h["login"](client)
         hdr = {"x-csrf-token": csrf}
         su = await h["step_up"](client, csrf)
@@ -142,6 +142,7 @@ async def test_run_token_lifecycle(admin_stack) -> None:
         assert r.status_code == 200
         first = r.json()
         run_token = first["run_token"]
+        assert first["remaining"] == 250
         # the single is consumed: reuse cannot mint another run (409 while
         # the first run is live; the single itself is dead either way)
         r = await client.post("/api/admin/rekey",
@@ -156,6 +157,8 @@ async def test_run_token_lifecycle(admin_stack) -> None:
                               headers={**hdr, "x-step-up-token": run_token},
                               json={"cursor": first["cursor"]})
         assert r.status_code == 200
+        second = r.json()
+        assert second["remaining"] == 50
         async with maker() as s:
             run = (await s.execute(select(StepUpToken).where(
                 StepUpToken.kind == "rekey_run"))).scalar_one()
@@ -167,15 +170,47 @@ async def test_run_token_lifecycle(admin_stack) -> None:
             await s.commit()
         r = await client.post("/api/admin/rekey",
                               headers={**hdr, "x-step-up-token": run_token},
-                              json={"cursor": first["cursor"]})
+                              json={"cursor": second["cursor"]})
         assert r.status_code == 401
         # fresh step-up mints a new run resuming from the last cursor
         su2 = await h["step_up"](client, csrf)
         r = await client.post("/api/admin/rekey",
                               headers={**hdr, "x-step-up-token": su2},
-                              json={"cursor": first["cursor"]})
+                              json={"cursor": second["cursor"]})
         assert r.status_code == 200
-        assert r.json().get("run_token")
+        third = r.json()
+        assert third["remaining"] == 0
+        # a completed sweep RELEASES its run row: no 30-minute 409 window
+        # (expired rows from earlier batches linger until retention prunes them)
+        async with maker() as s:
+            rows = (await s.execute(select(StepUpToken).where(
+                StepUpToken.kind == "rekey_run",
+                StepUpToken.expires_at > datetime.now(UTC)))).scalars().all()
+        assert rows == []
+        su3 = await h["step_up"](client, csrf)
+        r = await client.post("/api/admin/rekey",
+                              headers={**hdr, "x-step-up-token": su3}, json={})
+        assert r.status_code == 200  # not 409
+        assert r.json()["remaining"] == 0
+
+
+async def test_noop_first_batch_releases_run(admin_stack) -> None:
+    """A zero-row first batch must not block the next run for 30 minutes."""
+    async with admin_stack(keyring=RING2) as (client, maker, h):
+        csrf = await h["login"](client)
+        hdr = {"x-csrf-token": csrf}
+        su = await h["step_up"](client, csrf)
+        r = await client.post("/api/admin/rekey",
+                              headers={**hdr, "x-step-up-token": su}, json={})
+        assert r.status_code == 200 and r.json()["remaining"] == 0
+        async with maker() as s:
+            assert (await s.execute(select(StepUpToken).where(
+                StepUpToken.kind == "rekey_run",
+                StepUpToken.expires_at > datetime.now(UTC)))).scalars().all() == []
+        su2 = await h["step_up"](client, csrf)
+        r = await client.post("/api/admin/rekey",
+                              headers={**hdr, "x-step-up-token": su2}, json={})
+        assert r.status_code == 200  # immediate re-run works
 
 
 async def test_one_active_run(admin_stack) -> None:
@@ -284,8 +319,11 @@ async def test_replayed_final_cursor_terminates(admin_stack) -> None:
             last = (await s.execute(select(Field).order_by(Field.id.desc()))).scalars().first()
         cur = mint_scan_cursor({"table": "operator_account", "last_id": "1"},
                                h["settings"].pepper_raw, "rekey", "session")
+        # the completed first batch released its run row, so the token is dead;
+        # a FRESH step-up + the replayed past-the-end cursor terminates cleanly
+        su2 = await h["step_up"](client, csrf)
         r = await client.post("/api/admin/rekey",
-                              headers={**hdr, "x-step-up-token": first["run_token"]},
+                              headers={**hdr, "x-step-up-token": su2},
                               json={"cursor": cur})
         assert r.status_code == 200
         assert r.json()["remaining"] == 0

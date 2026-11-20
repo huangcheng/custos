@@ -82,8 +82,13 @@ def read_scan_cursor(token: str, pepper: bytes, endpoint: str, plane: str) -> di
     return body
 
 
-def _hash(token: str) -> bytes:
+def hash_token(token: str) -> bytes:
+    """SHA-256 of an opaque token: the stored lookup form (§4 exempted from
+    constant-time compare — a >=128-bit random preimage)."""
     return hashlib.sha256(token.encode()).digest()
+
+
+_hash = hash_token  # internal alias kept for the step-up lookups below
 
 
 async def mint_run(

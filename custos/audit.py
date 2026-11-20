@@ -47,7 +47,7 @@ DETAIL_KEYS: frozenset[str] = frozenset(
     {
         "pre_revision", "revision", "evicted", "evicted_ids", "dropped_unreadable",
         "codes_consumed", "count", "remaining", "skipped", "key_id", "break_glass",
-        "allow_sensitive", "ip", "stage", "reason", "created", "pruned",
+        "allow_sensitive", "allow_hazardous", "ip", "stage", "reason", "created", "pruned",
     }
 )
 

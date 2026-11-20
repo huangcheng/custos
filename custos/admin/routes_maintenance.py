@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 
 from custos.admin.auth import AdminPrincipal, require_admin, require_session_only
-from custos.audit import ACTION_ENUM, record_audit
+from custos.audit import ACTION_ENUM, add_audit_row
 from custos.cursors import mint_cursor, read_cursor
 from custos.db.models import AuditRow, OperatorSession, StepUpToken
 from custos.errors import AppError
@@ -27,6 +27,9 @@ from custos.rekey import (
     rekey_batch,
     validate_run,
     verify_batch,
+)
+from custos.rekey import (
+    hash_token as token_hash,
 )
 from custos.retention import run_retention
 from custos.routes_agent import _json_body, _page_limit
@@ -55,11 +58,9 @@ async def _resolve_run_auth(
             raise AppError("step_up_required", "step-up required")
         # run token first (multi-use); a consumed single falls through to
         # mint_run which re-validates and 409s if a run is already live
-        from custos.rekey import _hash
-
         row = (
             await session.execute(
-                select(StepUpToken).where(StepUpToken.nonce_hash == _hash(token))
+                select(StepUpToken).where(StepUpToken.nonce_hash == token_hash(token))
             )
         ).scalar_one_or_none()
         if row is not None and row.kind == "rekey_run":
@@ -89,10 +90,40 @@ async def _run_sweep(request: Request, p: AdminPrincipal, endpoint: str) -> dict
             )
         result = await engine_fn(session, vault, cursor_payload)
         if run is not None:
-            # re-fetch inside this transaction and extend on success
             run_row = await session.get(StepUpToken, run.id)
             if run_row is not None:
-                extend_run(run_row)
+                if result["remaining"] == 0:
+                    # completed sweep: release the run immediately — a fresh
+                    # rekey after a rotation must not 409 for the TTL window
+                    await session.delete(run_row)
+                else:
+                    extend_run(run_row)
+        if new_run_token is not None and result["remaining"] == 0:
+            # zero-row first batch: nothing to run — drop the row we just
+            # minted so it never blocks the next run, and never advertise a
+            # token whose row no longer exists
+            row = (
+                await session.execute(
+                    select(StepUpToken).where(
+                        StepUpToken.nonce_hash == token_hash(new_run_token)
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is not None:
+                await session.delete(row)
+            new_run_token = None
+        # run-start audit commits WITH the first batch (§4 invariant)
+        if first_batch or (p.actor_kind == "operator_token" and not cursor_raw):
+            detail: dict[str, object] = {}
+            if getattr(request.state, "allow_sensitive", False):
+                detail["allow_sensitive"] = True
+            add_audit_row(
+                session,
+                actor_kind=p.actor_kind, actor_id=p.actor_id,
+                actor_label=p.actor_label,
+                action="rekey" if endpoint == "rekey" else "rekey_verify",
+                item_name=None, ok=True, detail=detail,
+            )
         await session.commit()
     payload = result.pop("_cursor_payload", None)
     out: dict[str, Any] = {k: v for k, v in result.items()}
@@ -100,16 +131,6 @@ async def _run_sweep(request: Request, p: AdminPrincipal, endpoint: str) -> dict
         out["cursor"] = mint_scan_cursor(payload, pepper, endpoint, p.plane)
     if new_run_token is not None:
         out["run_token"] = new_run_token
-    if first_batch or (p.actor_kind == "operator_token" and not cursor_raw):
-        detail: dict[str, object] = {}
-        if getattr(request.state, "allow_sensitive", False):
-            detail["allow_sensitive"] = True
-        await record_audit(
-            maker,
-            actor_kind=p.actor_kind, actor_id=p.actor_id, actor_label=p.actor_label,
-            action="rekey" if endpoint == "rekey" else "rekey_verify",
-            item_name=None, ok=True, detail=detail,
-        )
     return out
 
 

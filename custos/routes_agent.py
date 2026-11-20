@@ -123,12 +123,13 @@ async def list_via_engine(
 ) -> dict[str, Any]:
     """Shared by REST list/search and the MCP tools — one implementation."""
     session_maker = state.session_maker
+    binding = getattr(key, "plane", key.actor_id)
     pepper = state.settings.pepper_raw
     limit = _page_limit(str(limit))
     search = q
     cursor_payload: dict[str, Any] = {}
     if cursor is not None:
-        cursor_payload = read_cursor(cursor, pepper, endpoint, key.actor_id)
+        cursor_payload = read_cursor(cursor, pepper, endpoint, binding)
     async with session_maker() as session:
         # scan narrow columns only: notes/blobs never loaded for scope checks
         stmt = select(Item.id, Item.name).order_by(Item.name)
@@ -202,11 +203,11 @@ async def list_via_engine(
                 fields_by_item.setdefault(item_id, []).append((fname, fsecret))
     next_cursor = None
     if has_more and last_visible is not None:
-        next_cursor = mint_cursor({"after": last_visible}, pepper, endpoint, key.actor_id)
+        next_cursor = mint_cursor({"after": last_visible}, pepper, endpoint, binding)
     elif not scan_exhausted and offset_name is not None:
         # scan budget hit with nothing visible: resume from the scan edge so
         # the caller can always make progress through out-of-scope stretches
-        next_cursor = mint_cursor({"after": offset_name}, pepper, endpoint, key.actor_id)
+        next_cursor = mint_cursor({"after": offset_name}, pepper, endpoint, binding)
     result = {
         "items": [
             _list_row(items_by_id[i[0]], fields_by_item.get(i[0], []), include_deleted)

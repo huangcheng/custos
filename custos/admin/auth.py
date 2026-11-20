@@ -74,7 +74,9 @@ def _client_ip(request: Any) -> str:
     return resolve_client_ip(peer, xff, request.app.state.settings.trusted_proxies)
 
 
-async def _audit_denial(request: Any, reason: str) -> None:
+async def _audit_denial(
+    request: Any, reason: str, principal: AdminPrincipal | None = None
+) -> None:
     ip = _client_ip(request)
     if reason == "admin_auth":
         # unauthenticated flood path: same 30/min/IP gate + shared ledger
@@ -82,12 +84,17 @@ async def _audit_denial(request: Any, reason: str) -> None:
         limiter = request.app.state.rate_limiter
         limiter.check_failed_auth_gate(ip)
         limiter.record_failed_auth(ip)
+    # a KNOWN token probing a session-only route keeps its key_id attribution
+    # (forensics); anonymous failures stay actor_id=None per the closed set
+    actor_kind = "anonymous" if principal is None else principal.actor_kind
+    actor_id = None if principal is None else principal.actor_id
+    actor_label = "anonymous" if principal is None else principal.actor_label
     try:
         await record_audit(
             request.app.state.session_maker,
-            actor_kind="anonymous",
-            actor_id=None,
-            actor_label="anonymous",
+            actor_kind=actor_kind,
+            actor_id=actor_id,
+            actor_label=actor_label,
             action="auth.failure",
             item_name=None,
             ok=False,
@@ -165,7 +172,7 @@ async def require_session_only(request: Request) -> AdminPrincipal:
     principal = await require_admin(request)
     if principal.actor_kind != "operator_session":
         # §6: the gate fires BEFORE any state check — audited, uniform 403
-        await _audit_denial(request, "session_required")
+        await _audit_denial(request, "session_required", principal)
         raise AppError("session_required", "interactive session required")
     await _header_step_up(request, principal, consume=True)
     return principal

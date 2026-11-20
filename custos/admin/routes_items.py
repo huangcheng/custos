@@ -133,7 +133,7 @@ async def _write_with_downgrade_gate(
     the engine re-classifies under the row lock and consumes on success."""
     from sqlalchemy import select
 
-    from custos.admin.auth import _header_step_up, peek_step_up
+    from custos.admin.auth import _header_step_up
     from custos.db.models import Item
     from custos.items import _decrypt_views, _load_fields
     from custos.limits import DowngradeError, plan_patch_ops, plan_put_ops
@@ -179,12 +179,10 @@ async def _write_with_downgrade_gate(
             raise AppError("step_up_required", "step-up required")
         # the engine marks detail.allow_sensitive from p.allow_sensitive
         return await _run(True)
-    await peek_step_up(request, p)  # 401 without burning anything
-    try:
-        return await _run(False)  # engine raises DowngradeError under the lock
-    except AppError as exc:
-        if exc.code != "secret_downgrade_denied":
-            raise
+    # No downgrade applies without a valid gate: burn the single-use step-up
+    # BEFORE the write so two concurrent requests cannot both apply it
+    # (single-use is a hard §5 invariant; a post-consume write failure is the
+    # same accepted cost as every other step-gated route).
     await _header_step_up(request, p, consume=True)
     return await _run(True)
 

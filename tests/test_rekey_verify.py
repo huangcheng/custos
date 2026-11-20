@@ -86,10 +86,11 @@ async def test_verify_visits_newest_rows(admin_stack) -> None:
         r = await client.post("/api/admin/rekey",
                               headers={**hdr, "x-step-up-token": su}, json={})
         assert r.status_code == 200 and r.json()["remaining"] == 0
-        run_token = r.json()["run_token"]
+        # a completed sweep releases its run row; verify starts fresh
+        su = await h["step_up"](client, csrf)
         # verify: visits newest rows, finds the corruption, changes nothing
         r = await client.post("/api/admin/rekey/verify",
-                              headers={**hdr, "x-step-up-token": run_token}, json={})
+                              headers={**hdr, "x-step-up-token": su}, json={})
         assert r.status_code == 200
         data = r.json()
         assert data["unreadable"] == {"fields": 1, "history": 0, "operator": 0}
@@ -114,21 +115,22 @@ async def test_verify_run_and_cursor(admin_stack) -> None:
         first = r.json()
         run_token = first["run_token"]
         assert first["remaining"] > 0
-        # same run token works on rekey too (one run kind, both endpoints)
-        r = await client.post("/api/admin/rekey",
-                              headers={**hdr, "x-step-up-token": run_token}, json={})
-        assert r.status_code == 200
-        # verify cursor on rekey endpoint → 401 (endpoint-tagged)
+        # verify cursor on the rekey endpoint → 401 (endpoint-tagged cursors);
+        # the run row survives a rejected batch
         r = await client.post("/api/admin/rekey",
                               headers={**hdr, "x-step-up-token": run_token},
                               json={"cursor": first["cursor"]})
         assert r.status_code == 401
-        # verify cursor on verify → 200, completes
+        # the same run token is accepted by its own endpoint and completes
         r = await client.post("/api/admin/rekey/verify",
                               headers={**hdr, "x-step-up-token": run_token},
                               json={"cursor": first["cursor"]})
         assert r.status_code == 200
         assert r.json()["remaining"] == 0
+        # …which releases the run: the token is now dead everywhere
+        r = await client.post("/api/admin/rekey/verify",
+                              headers={**hdr, "x-step-up-token": run_token}, json={})
+        assert r.status_code == 401
 
 
 async def test_verify_gates(admin_stack) -> None:
