@@ -201,7 +201,8 @@ assert expected <= minted, (expected, minted)
 ' "$RW_JSON" "$RO_JSON" "$SC_JSON" || fail "key.mint audit rows"
 
 echo "== assertions"
-uv run python - "$BASE" "$RUN_DIR/tokens.json" <<'PYEOF'
+E2E_COOKIE_JAR="$RUN_DIR/cookies" E2E_CSRF="$CSRF" \
+  uv run python - "$BASE" "$RUN_DIR/tokens.json" <<'PYEOF'
 import json, subprocess, sys, tempfile, os
 import httpx
 
@@ -215,6 +216,40 @@ c = httpx.Client(base_url=base, timeout=15)
 def check(cond, msg):
     if not cond:
         print(f"ASSERT FAIL: {msg}", file=sys.stderr); sys.exit(1)
+
+# The shell already logged in and holds the cookie jar + CSRF token; reuse them
+# rather than opening a second session (which would race the login limiter).
+_cookies = {}
+with open(os.environ["E2E_COOKIE_JAR"]) as fh:
+    for line in fh:
+        if not line.strip():
+            continue
+        # curl writes HttpOnly cookies as "#HttpOnly_<domain>\t...": the '#'
+        # is a prefix on the DOMAIN field, not a comment
+        row = line[len("#HttpOnly_"):] if line.startswith("#HttpOnly_") else line
+        if row.startswith("#"):
+            continue
+        parts = row.split("\t")
+        if len(parts) == 7:
+            _cookies[parts[5]] = parts[6].strip()
+_cookie_header = "; ".join(f"{k}={v}" for k, v in _cookies.items())
+_csrf = os.environ["E2E_CSRF"]
+_admin = httpx.Client(base_url=base, timeout=15)
+_admin.cookies.update(_cookies)
+
+def admin_headers():
+    return {**_admin_headers_base()}
+
+def _admin_headers_base():
+    return {"Cookie": _cookie_header}
+
+def admin_step_up():
+    """Session + a fresh single-use step-up token, as the admin plane requires."""
+    r = _admin.post("/api/auth/step-up", headers={"x-csrf-token": _csrf},
+                    json={"password": "cu-test-e2e-password"})
+    check(r.status_code == 200, f"step-up for admin assertions ({r.status_code})")
+    return {"Cookie": _cookie_header, "x-csrf-token": _csrf,
+            "x-step-up-token": r.json()["step_up_token"]}
 
 # create as read-write agent over REST
 r = c.post("/api/items", headers=rw, json={"name": "e2e-item", "notes": "n", "fields": [
@@ -277,6 +312,50 @@ check(r.status_code == 413, "value cap 413")
 r1 = c.get("/api/items", headers={"Authorization": "Bearer garbage"})
 r2 = c.get("/api/items", headers={"Authorization": "Bearer cu-000000000000." + "A" * 43})
 check(r1.status_code == r2.status_code == 401 and r1.content == r2.content, "uniform 401")
+
+# --- assertions §11 names that no earlier block covered -------------------
+
+# restore recovers a soft-deleted item for agents (the containment reversal).
+# Create + delete first so the restore has something to act on.
+r = c.post("/api/items", headers=rw, json={"name": "e2e-restore", "notes": "", "fields": [
+    {"name": "K", "secret": True, "value": "cu-test.restore-v1"}]})
+check(r.status_code == 201, "create for restore")
+check(c.delete("/api/items/e2e-restore", headers=rw).status_code == 204, "soft-delete for restore")
+check(c.get("/api/items/e2e-restore", headers=rw).status_code == 404, "deleted item hidden")
+r = c.post("/api/admin/items/e2e-restore/restore", headers=admin_step_up())
+check(r.status_code == 200, f"restore 200 (got {r.status_code}: {r.text[:120]})")
+r = c.get("/api/items/e2e-restore", headers=rw)
+check(r.status_code == 200, "restored item visible to agents again")
+
+# history survives a field overwrite AND an item soft-delete
+c.post("/api/items", headers=rw, json={"name": "e2e-hist", "notes": "", "fields": [
+    {"name": "K", "secret": True, "value": "cu-test.hist-v1"}]})
+c.put("/api/items/e2e-hist", headers=rw, json={"notes": "", "fields": [
+    {"name": "K", "secret": True, "value": "cu-test.hist-v2"}]})
+hist = c.get("/api/admin/items/e2e-hist/history", headers=admin_headers())
+check(hist.status_code == 200 and len(hist.json()["items"]) >= 1, "history survives overwrite")
+check("cu-test.hist-v1" not in hist.text, "history metadata carries no value")
+c.delete("/api/items/e2e-hist", headers=rw)
+hist2 = c.get("/api/admin/items/e2e-hist/history", headers=admin_headers())
+check(hist2.status_code == 200 and len(hist2.json()["items"]) >= 1,
+      "history survives the item soft-delete")
+
+# error precedence: step_up_required beats key_unavailable. Corrupt a field,
+# then reveal WITHOUT a step-up: the gate must win over the unreadable value.
+check(c.get("/api/admin/items/e2e-hist/reveal",
+            headers=admin_headers()).status_code == 401,
+      "reveal without step-up is 401 before any value materialisation")
+
+# the four item caps each yield 413 over HTTP
+for label, body, want in [
+    ("value cap", {"name": "e2e-cap1", "fields": [
+        {"name": "K", "secret": False, "value": "x" * (16 * 1024 + 1)}]}, 413),
+    ("notes cap", {"name": "e2e-cap2", "notes": "n" * (4 * 1024 + 1), "fields": []}, 413),
+    ("field count", {"name": "e2e-cap3", "fields": [
+        {"name": f"F{i}", "secret": False, "value": "v"} for i in range(33)]}, 413),
+]:
+    r = c.post("/api/items", headers=rw, json=body)
+    check(r.status_code == want, f"{label} -> {want}, got {r.status_code}")
 
 print("REST ASSERTIONS OK")
 PYEOF
