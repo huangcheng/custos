@@ -20,6 +20,8 @@ pub fn prompt_secret(what: &str) -> Result<String, CliError> {
         return rpassword::prompt_password(what)
             .map_err(|e| CliError::Io(format!("cannot read the {what}: {e}")));
     }
+    // prompts go to STDERR: stdout carries data (a token), and callers capture
+    // stdout with `$(...)`
     eprint!("{what}");
     let mut line = String::new();
     std::io::stdin()
@@ -31,8 +33,8 @@ pub fn prompt_secret(what: &str) -> Result<String, CliError> {
 
 /// Read a non-secret value (a username, a TOTP code).
 pub fn prompt_line(what: &str) -> Result<String, CliError> {
-    print!("{what}");
-    std::io::stdout()
+    eprint!("{what}");
+    std::io::stderr()
         .flush()
         .map_err(|e| CliError::Io(e.to_string()))?;
     let mut line = String::new();

@@ -61,11 +61,9 @@ async fn connect(dsn: &str) -> Result<tokio_postgres::Client, CliError> {
     Ok(client)
 }
 
-fn now_marker() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
-}
+/// `suppressed_until_events_ts` is a `timestamptz`: tokio-postgres needs a real
+/// timestamp, so use `now()` on the server side instead of binding a string.
+const NOW_MARKER_SQL: &str = "now()";
 
 /// Generic over the executor so both a `Client` and a `Transaction` work.
 async fn audit<E>(executor: &E, action: &str, detail: serde_json::Value) -> Result<(), CliError>
@@ -91,18 +89,20 @@ pub async fn unlock(dsn: &str, ip: Option<&str>) -> Result<(), CliError> {
         .transaction()
         .await
         .map_err(|e| CliError::Config(e.to_string()))?;
-    let marker = now_marker();
     let scopes: Vec<String> = match ip {
         Some(addr) => vec!["account".into(), format!("ip:{addr}")],
         None => vec!["account".into(), "ip:*".into()],
     };
     for scope in &scopes {
-        tx.execute(
-            "INSERT INTO lockout_suppressions (scope, suppressed_until_events_ts) VALUES ($1, $2)",
-            &[scope, &marker],
-        )
-        .await
-        .map_err(|e| CliError::Config(format!("cannot insert the {scope} marker: {e}")))?;
+        // `id` is a UUID primary key with no server-side default in the ORM
+        // model, so a raw INSERT must generate it (pgcrypto/13+ builtin).
+        let sql = format!(
+            "INSERT INTO lockout_suppressions (id, scope, suppressed_until_events_ts) \
+             VALUES (gen_random_uuid(), $1, {NOW_MARKER_SQL})"
+        );
+        tx.execute(&sql, &[scope])
+            .await
+            .map_err(|e| CliError::Config(format!("cannot insert the {scope} marker: {e}")))?;
     }
     audit(
         &tx,

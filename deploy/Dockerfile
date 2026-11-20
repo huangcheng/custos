@@ -12,8 +12,22 @@ COPY console/ ./
 RUN npm run build && test -f dist/index.html
 
 
+# ---- cli build -------------------------------------------------------------
+# NOT --platform=$BUILDPLATFORM: the binary is native, so it must be built for
+# the TARGET platform or a cross-built image ships a binary for the wrong arch.
+FROM rust:1-slim-bookworm AS cli-build
+WORKDIR /build
+COPY cli/Cargo.toml cli/Cargo.lock ./
+# a dummy main so the dependency layer caches independently of the sources;
+# --locked keeps the dependency set identical to the committed lockfile
+RUN mkdir -p src && echo "fn main() {}" > src/main.rs && cargo build --release --locked
+# only the sources: copying tests/ would recompile the crate for test-only edits
+COPY cli/src ./src
+RUN touch src/main.rs && cargo build --release --locked
+
+
 # ---- runtime ---------------------------------------------------------------
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 
@@ -35,7 +49,13 @@ RUN uv sync --frozen --no-dev --no-cache
 COPY --from=console-build /build/dist ./console/dist
 RUN test -f ./console/dist/index.html
 
-ENV HOME=/home/custos PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:$PATH" \
+# The operator CLI, for break-glass from the host shell (§9).
+COPY --from=cli-build /build/target/release/custos /app/bin/custos
+# run it: a glibc mismatch between the two base images would leave a binary
+# that exists and is executable but cannot start
+RUN /app/bin/custos --version
+
+ENV HOME=/home/custos PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:/app/bin:$PATH" \
     CUSTOS_CONSOLE_DIST=/app/console/dist
 USER custos
 EXPOSE 8300
