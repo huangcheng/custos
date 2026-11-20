@@ -13,13 +13,25 @@ use crate::CliError;
 const APP_DIR: &str = "custos";
 const FILE: &str = "session.json";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Session {
     pub base_url: String,
     pub cookie: String,
     pub csrf: String,
     #[serde(with = "time::serde::rfc3339")]
     pub expires_at: OffsetDateTime,
+}
+
+impl std::fmt::Debug for Session {
+    /// Never print the cookie or the CSRF token: one `{:?}` would leak both.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("base_url", &self.base_url)
+            .field("cookie", &"<redacted>")
+            .field("csrf", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl Session {

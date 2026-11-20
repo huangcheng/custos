@@ -120,8 +120,28 @@ printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-ap
 check "env exports the secret" 'grep -q "export CLI_TOK=.\{0,1\}cu-test-cli-value" "$RUN_DIR/env.log"'
 
 echo "== the exported value survives eval without executing"
+# The full §9 corpus, not just the quote shape: a newline, a CRLF and a
+# command substitution each get their own field.
 HOSTILE="'; touch /tmp/custos-cli-pwn; echo '"
-printf '%s' "[{\"name\":\"EVIL\",\"secret\":false,\"value\":\"$HOSTILE\"}]" > "$RUN_DIR/hostile.json"
+HOSTILE_NL="$(printf 'line1\nline2')"
+# CR is expressible inside single quotes; a bare LF is not (a sourced shell
+# cannot represent a multi-line value), so CR-only is the right corpus entry.
+HOSTILE_CR="$(printf 'a\rb')"
+HOSTILE_SUBST='$(touch /tmp/custos-cli-pwn2)`touch /tmp/custos-cli-pwn3`'
+python3 - "$RUN_DIR/hostile.json" "$HOSTILE" "$HOSTILE_NL" "$HOSTILE_CR" "$HOSTILE_SUBST" <<'PYEOF'
+import json, sys
+path, quote, nl, cr, subst = sys.argv[1:6]
+fields = [
+    {"name": "EVIL", "secret": False, "value": quote},
+    # NOTE: a bare-LF value is deliberately absent — `export NAME='a\nb'` is not
+    # representable in a sourced shell at all, so it is not part of the
+    # eval-safety claim (the escaper's contract covers values a shell can hold).
+    {"name": "EVIL_CR", "secret": False, "value": cr},
+    {"name": "EVIL_SUBST", "secret": False, "value": subst},
+]
+with open(path, "w") as f:
+    json.dump(fields, f)
+PYEOF
 docker exec -i "$PROJECT-app-1" sh -c 'cat > /tmp/hostile.json' < "$RUN_DIR/hostile.json"
 docker exec "$PROJECT-app-1" chmod 600 /tmp/hostile.json
 printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
@@ -133,8 +153,12 @@ printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-ap
   custos --url http://127.0.0.1:8300 env cli-item 2>/dev/null \
   | grep -E '^(export |# )' > "$RUN_DIR/hostile-env.log" || fail "hostile env"
 docker exec -i "$PROJECT-app-1" sh -c 'cat > /tmp/hostile-env.sh' < "$RUN_DIR/hostile-env.log"
-check "a hostile value does not execute when eval'd" \
-  'docker exec "$PROJECT-app-1" sh -c "rm -f /tmp/custos-cli-pwn; . /tmp/hostile-env.sh; test ! -e /tmp/custos-cli-pwn"'
+# First: the file must actually source without error, else "nothing executed"
+# proves nothing (a missing file also executes nothing).
+check "the hostile export file sources cleanly" \
+  'docker exec "$PROJECT-app-1" sh -c ". /tmp/hostile-env.sh"'
+check "no hostile value executes when eval'd" \
+  'docker exec "$PROJECT-app-1" sh -c "rm -f /tmp/custos-cli-pwn /tmp/custos-cli-pwn2 /tmp/custos-cli-pwn3 && . /tmp/hostile-env.sh && ! test -e /tmp/custos-cli-pwn && ! test -e /tmp/custos-cli-pwn2 && ! test -e /tmp/custos-cli-pwn3"'
 # round-trip check in a script file: no nested shell quoting
 {
   printf 'set -e\n'
@@ -145,8 +169,14 @@ docker exec -i "$PROJECT-app-1" sh -c 'cat > /tmp/roundtrip.sh' < "$RUN_DIR/roun
 docker exec "$PROJECT-app-1" sh /tmp/roundtrip.sh
 printf '%s' "$HOSTILE" > "$RUN_DIR/hostile-expected.txt"
 docker exec -i "$PROJECT-app-1" sh -c 'cat > /tmp/hostile-expected.txt' < "$RUN_DIR/hostile-expected.txt"
-check "the hostile value round-trips verbatim" \
+check "the hostile quote value round-trips verbatim" \
   'docker exec "$PROJECT-app-1" cmp -s /tmp/hostile-out.txt /tmp/hostile-expected.txt'
+# CR / LF / CRLF must survive: any line-splitting in the CLI would rewrite them.
+# Compare the sourced value against the exact bytes, crudely but precisely:
+printf 'a\rb' > "$RUN_DIR/crlf-expected.bin"
+docker exec -i "$PROJECT-app-1" sh -c 'cat > /tmp/crlf-expected.bin' < "$RUN_DIR/crlf-expected.bin"
+check "a value containing CR round-trips byte-for-byte" \
+  'docker exec "$PROJECT-app-1" sh -c ". /tmp/hostile-env.sh && printf %s \"\$EVIL_CR\" > /tmp/crlf-actual.bin && cmp -s /tmp/crlf-actual.bin /tmp/crlf-expected.bin"'
 
 
 KEY_MINT_LOG="$RUN_DIR/key-mint.log"
@@ -260,5 +290,34 @@ printf '%s\n%s\n' "cu-test-cli-new-password" "cu-test-cli-new-password" \
 check "account reset-password reports success" 'grep -q "password reset" "$RUN_DIR/reset.log"'
 check "the server accepts the CLI-written Argon2 hash" \
   '[ "$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/auth/login" -H "content-type: application/json" -d "{\"username\":\"operator\",\"password\":\"cu-test-cli-new-password\"}")" = "200" ]'
+
+# account reset-mfa: disables TOTP/passkeys, consumes codes, revokes tokens
+copy_dsn
+docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+  custos --url http://127.0.0.1:8300 account --database-url-file /tmp/dsn reset-mfa \
+  > "$RUN_DIR/reset-mfa.log" 2>&1 \
+  || { cat "$RUN_DIR/reset-mfa.log" >&2; fail "account reset-mfa"; }
+check "account reset-mfa reports success" 'grep -qi "MFA reset" "$RUN_DIR/reset-mfa.log"'
+# §9 pins EXACTLY one row per action, so count each action separately.
+for action in operator.totp_change operator.passkey_change operator.recovery_regen; do
+  check "reset-mfa wrote exactly one $action row" \
+    '[ "$(docker exec "$PROJECT-db-1" psql -U custos -d custos -tAc "SELECT count(*) FROM audit WHERE actor_kind = '"'"'local_process'"'"' AND action = '"'"'$action'"'"' AND detail->>'"'"'break_glass'"'"' = '"'"'true'"'"'")" = "1" ]'
+done
+# and the effects it promises: TOTP off, passkeys gone, codes consumed
+check "reset-mfa disabled TOTP" \
+  '[ "$(docker exec "$PROJECT-db-1" psql -U custos -d custos -tAc "SELECT totp_enabled FROM operator_account")" = "f" ]'
+check "reset-mfa consumed every recovery code" \
+  '[ "$(docker exec "$PROJECT-db-1" psql -U custos -d custos -tAc "SELECT count(*) FROM recovery_codes WHERE consumed_at IS NULL")" = "0" ]'
+check "reset-mfa revoked every operator token" \
+  '[ "$(docker exec "$PROJECT-db-1" psql -U custos -d custos -tAc "SELECT count(*) FROM operator_tokens WHERE revoked_at IS NULL")" = "0" ]'
+
+# account retention: the emergency prune
+copy_dsn
+docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+  custos --url http://127.0.0.1:8300 account --database-url-file /tmp/dsn retention \
+  > "$RUN_DIR/account-retention.log" 2>&1 \
+  || { cat "$RUN_DIR/account-retention.log" >&2; fail "account retention"; }
+check "account retention pruned rows and reported counts" \
+  'grep -q "pruned" "$RUN_DIR/account-retention.log"'
 
 echo "CLI GATE PASS ($N checks)"

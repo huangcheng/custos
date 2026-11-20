@@ -256,6 +256,13 @@ pub async fn reset_mfa(dsn: &str) -> Result<(), CliError> {
 }
 
 /// `custos account retention` — the emergency prune with no session (§9).
+///
+/// This is the LAST-RESORT path when no session can be obtained, and it prunes
+/// the SAME set the server's `POST /api/admin/retention` does:
+/// `field_history` (respecting the 20-newest floor), `audit`, `auth_events`,
+/// dead `operator_sessions`, consumed/expired `step_up_tokens`, expired/consumed
+/// `device_codes` and `webauthn_challenges`, and stale `lockout_suppressions`.
+/// `CUSTOS_RETENTION_DAYS` (floor 7) sets the window.
 pub async fn retention(dsn: &str) -> Result<(), CliError> {
     let mut client = connect(dsn).await?;
     let tx = client

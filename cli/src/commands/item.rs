@@ -75,7 +75,7 @@ pub async fn run(client: &Client, cmd: ItemCommand, as_json: bool) -> Result<(),
                     )
                     .await?
             } else {
-                client.get(RouteClass::SessionOnly, &path).await?
+                client.get(RouteClass::TokenPermitted, &path).await?
             };
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
@@ -108,10 +108,16 @@ pub async fn run(client: &Client, cmd: ItemCommand, as_json: bool) -> Result<(),
             // "create or replace": the admin PUT has no upsert flag, so create
             // when the name is absent and replace when it exists.
             let item_path = format!("/api/admin/items/{}", Client::seg(&name));
-            let exists = client
-                .get(RouteClass::SessionOnly, &item_path)
-                .await
-                .is_ok();
+            let exists = match client.get(RouteClass::TokenPermitted, &item_path).await {
+                Ok(_) => true,
+                Err(CliError::Server { status: 404, .. }) => false,
+                Err(err) => {
+                    return Err(CliError::Config(format!(
+                        "cannot tell whether {name} exists ({err}); refusing to guess \
+                         between create and replace"
+                    )))
+                }
+            };
             let out = if exists {
                 client
                     .put(RouteClass::TokenPermitted, &item_path, Some(body))
@@ -133,7 +139,7 @@ pub async fn run(client: &Client, cmd: ItemCommand, as_json: bool) -> Result<(),
         ItemCommand::Rm { name } => {
             client
                 .delete(
-                    RouteClass::SessionOnly,
+                    RouteClass::TokenPermitted,
                     &format!("/api/admin/items/{}", Client::seg(&name)),
                     None,
                 )
@@ -183,7 +189,7 @@ pub async fn run(client: &Client, cmd: ItemCommand, as_json: bool) -> Result<(),
         ItemCommand::History { name } => {
             let body = client
                 .get(
-                    RouteClass::SessionOnly,
+                    RouteClass::TokenPermitted,
                     &format!("/api/admin/items/{}/history", Client::seg(&name)),
                 )
                 .await?;

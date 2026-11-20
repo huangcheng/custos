@@ -38,6 +38,12 @@ pub async fn run(
         return Ok(());
     }
     if let Some(rows) = out.get("items").and_then(Value::as_array) {
+        if out.get("next_cursor").and_then(Value::as_str).is_some() {
+            eprintln!(
+                "note: more rows match; this command shows one page — use --json with the \
+                 console or raise the limit"
+            );
+        }
         for row in rows {
             println!(
                 "{}\t{}\t{}\t{}\t{}",

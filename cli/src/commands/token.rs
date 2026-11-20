@@ -67,7 +67,7 @@ pub async fn run(client: &Client, cmd: TokenCommand, as_json: bool) -> Result<()
             client
                 .delete(
                     RouteClass::SessionOnly,
-                    &format!("/api/admin/tokens/{key_id}"),
+                    &format!("/api/admin/tokens/{}", Client::seg(&key_id)),
                     Some(&step_up),
                 )
                 .await?;

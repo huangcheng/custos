@@ -14,10 +14,20 @@ use serde_json::Value;
 use crate::session::Session;
 use crate::CliError;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Credentials {
     EnvToken(String),
     Session(Session),
+}
+
+impl std::fmt::Debug for Credentials {
+    /// The env token is a live credential: never print it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Credentials::EnvToken(_) => f.write_str("EnvToken(<redacted>)"),
+            Credentials::Session(session) => write!(f, "Session({session:?})"),
+        }
+    }
 }
 
 impl Credentials {

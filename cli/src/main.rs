@@ -111,7 +111,14 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Login => return commands::account::login(cli.url.as_deref()).await,
         Command::Logout => {
             session::clear()?;
-            println!("signed out");
+            // The server-side session keeps its TTL: say so, because an
+            // operator logging out of a suspect machine believes otherwise.
+            eprintln!(
+                "local session removed. The server-side session stays valid until it \
+                 expires or is revoked; revoke it from the console if this machine \
+                 may be compromised."
+            );
+            println!("signed out (locally)");
             return Ok(());
         }
         Command::Account {
@@ -145,8 +152,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     }
 }
 
-/// Pick the credential: an env token wins for token-permitted routes, the
-/// session serves session-only routes. `api::Client` enforces the split.
+/// Pick the credential. `CUSTOS_OPERATOR_TOKEN` wins for token-permitted routes
+/// and the stored session serves session-only routes; `api::Client` refuses to
+/// send the token where a session is required. Run a one-off session-only
+/// command with the env token unset.
 fn build_client(url: Option<&str>) -> Result<Client, CliError> {
     let base_url = url
         .map(str::to_string)
