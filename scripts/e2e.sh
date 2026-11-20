@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# e2e.sh — API + remote-MCP end-to-end gate (design §11, plan-1 scope).
+# e2e.sh — API + admin + remote-MCP end-to-end gate (design §11).
 # Throwaway postgres + app via compose; fake secrets generated per run.
-# Operator setup/mint arrives with plan 2 — keys are seeded directly into
-# the throwaway DB via scripts/e2e_seed.py (documented E2E scaffolding).
+# Keys are minted through the REAL admin flow (setup → login → step-up →
+# POST /api/admin/keys); revocation goes through DELETE /api/admin/keys.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -154,9 +154,51 @@ asyncio.run(main())
 PYEOF
 then fail "device attempt-cap"; fi
 
-echo "== seed agent keys (E2E scaffolding, pre-operator-auth)"
-docker exec -i "$PROJECT-app-1" /app/.venv/bin/python - < scripts/e2e_seed.py > "$RUN_DIR/tokens.json" \
-  || fail "seed"
+echo "== mint agent keys through the real admin flow"
+step_up() {
+  curl -fsS -m 10 -b "$RUN_DIR/cookies" -X POST "$BASE/api/auth/step-up" \
+    -H "x-csrf-token: $CSRF" -H 'content-type: application/json' \
+    -d '{"password":"cu-test-e2e-password"}' \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["step_up_token"])'
+}
+mint_key() { # label mode scopes-json
+  local su; su=$(step_up)
+  curl -fsS -m 10 -b "$RUN_DIR/cookies" -X POST "$BASE/api/admin/keys" \
+    -H "x-csrf-token: $CSRF" -H "x-step-up-token: $su" -H 'content-type: application/json' \
+    -d "{\"label\":\"$1\",\"mode\":\"$2\",\"scopes\":$3}"
+}
+RW_JSON=$(mint_key e2e-rw read-write '["*"]') || fail "mint rw"
+RO_JSON=$(mint_key e2e-ro read '["*"]') || fail "mint ro"
+SC_JSON=$(mint_key e2e-scoped read-write '["stock-*"]') || fail "mint scoped"
+python3 - "$RUN_DIR/tokens.json" "$RW_JSON" "$RO_JSON" "$SC_JSON" <<'PYEOF'
+import json, sys
+path, rw, ro, sc = sys.argv[1:5]
+rw, ro, sc = json.loads(rw), json.loads(ro), json.loads(sc)
+with open(path, "w") as f:
+    json.dump({"rw": rw["token"], "ro": ro["token"], "scoped": sc["token"],
+               "rw_key_id": rw["key_id"]}, f)
+PYEOF
+# session-only gate: an operator token can never mint keys (403 before state)
+SU=$(step_up)
+CO_JSON=$(curl -fsS -m 10 -b "$RUN_DIR/cookies" -X POST "$BASE/api/admin/tokens" \
+  -H "x-csrf-token: $CSRF" -H "x-step-up-token: $SU" -H 'content-type: application/json' \
+  -d "{\"label\":\"e2e-co\",\"expires_at\":\"$(python3 -c 'from datetime import UTC,datetime,timedelta; print((datetime.now(UTC)+timedelta(days=7)).isoformat())')\"}")
+CO=$(printf '%s' "$CO_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+S=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$BASE/api/admin/keys" \
+  -H "Authorization: Bearer $CO" -H 'content-type: application/json' \
+  -d '{"label":"x","mode":"read","scopes":[]}')
+[ "$S" = "403" ] || fail "token mint must 403 session_required, got $S"
+# masked admin get + audit read via the operator token
+MASKED=$(curl -fsS -m 10 "$BASE/api/admin/items" -H "Authorization: Bearer $CO")
+printf '%s' "$MASKED" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "items" in d' || fail "admin list"
+AUDIT=$(curl -fsS -m 10 "$BASE/api/admin/audit?action=key.mint" -H "Authorization: Bearer $CO")
+printf '%s' "$AUDIT" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+minted = {x["detail"].get("key_id") for x in d["items"]}
+expected = {json.loads(a)["key_id"] for a in sys.argv[1:4]}
+assert expected <= minted, (expected, minted)
+' "$RW_JSON" "$RO_JSON" "$SC_JSON" || fail "key.mint audit rows"
 
 echo "== assertions"
 uv run python - "$BASE" "$RUN_DIR/tokens.json" <<'PYEOF'
@@ -305,13 +347,17 @@ async def main():
 
 anyio.run(main)
 PYEOF
-echo "== revoke bites on the next MCP request"
+echo "== revoke bites on the next MCP request (real admin revoke)"
 BEFORE_AUTHFAIL=$(docker exec "$PROJECT-db-1" psql -U custos -d custos -tAc \
   "SELECT count(*) FROM auth_events WHERE kind='agent_auth' AND NOT ok;")
 BEFORE_AUDITFAIL=$(docker exec "$PROJECT-db-1" psql -U custos -d custos -tAc \
   "SELECT count(*) FROM audit WHERE action='auth.failure' AND ok=false;")
-docker exec "$PROJECT-db-1" psql -U custos -d custos -tAc \
-  "UPDATE agent_keys SET revoked_at = now() WHERE label = 'e2e-rw';" >/dev/null
+RW_KEY_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["rw_key_id"])' "$RUN_DIR/tokens.json")
+SU=$(step_up)
+REV=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -b "$RUN_DIR/cookies" \
+  -X DELETE "$BASE/api/admin/keys/$RW_KEY_ID" \
+  -H "x-csrf-token: $CSRF" -H "x-step-up-token: $SU")
+[ "$REV" = "204" ] || fail "admin revoke, got $REV"
 uv run python - "$BASE" "$RUN_DIR/tokens.json" <<'PYEOF'
 import anyio, json, sys
 import httpx2
@@ -346,5 +392,14 @@ docker exec "$PROJECT-db-1" psql -U custos -d custos -tAc \
   "SELECT count(*) FROM auth_events WHERE kind='agent_auth' AND NOT ok;" \
   | grep -qv '^0$' || fail "auth failure ledger rows"
 # MCP-path auth failure verified by the before/after deltas above
+# admin-plane write masking: no secret value in any admin item response
+MASKED_ITEM=$(curl -fsS -m 10 "$BASE/api/admin/items/e2e-mcp" -H "Authorization: Bearer $CO")
+if printf '%s' "$MASKED_ITEM" | grep -q 'cu-test.mcp-e2e'; then
+  fail "masked admin get leaked a secret"
+fi
+# key.revoke audited through the real flow
+docker exec "$PROJECT-db-1" psql -U custos -d custos -tAc \
+  "SELECT count(*) FROM audit WHERE action='key.revoke';" \
+  | grep -qv '^0$' || fail "key.revoke audit row"
 
 echo "E2E PASS (log dir: $LOG_DIR)"

@@ -7,14 +7,16 @@ successful batch."""
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 
 from custos.admin.auth import AdminPrincipal, require_admin, require_session_only
-from custos.audit import record_audit
-from custos.db.models import OperatorSession, StepUpToken
+from custos.audit import ACTION_ENUM, record_audit
+from custos.cursors import mint_cursor, read_cursor
+from custos.db.models import AuditRow, OperatorSession, StepUpToken
 from custos.errors import AppError
 from custos.rekey import (
     extend_run,
@@ -27,7 +29,7 @@ from custos.rekey import (
     verify_batch,
 )
 from custos.retention import run_retention
-from custos.routes_agent import _json_body
+from custos.routes_agent import _json_body, _page_limit
 
 router = APIRouter(prefix="/api/admin")
 
@@ -144,3 +146,67 @@ async def post_retention(
         )
         await session.commit()
     return counts
+
+
+@router.get("/audit")
+async def get_audit(
+    request: Request,
+    actor: str | None = None,
+    action: str | None = None,
+    item: str | None = None,
+    cursor: str | None = None,
+    limit: str | None = None,
+    p: AdminPrincipal = Depends(require_admin),
+) -> dict[str, Any]:
+    """50/100 keyset pages (id ascending), AND-combined filters. Plain
+    admin auth; enumeration read — not audited (§4)."""
+    page = _page_limit(limit)
+    pepper = request.app.state.settings.pepper_raw
+    payload = read_cursor(cursor, pepper, "admin_audit", p.plane) if cursor else {}
+    stmt = select(AuditRow).order_by(AuditRow.id)
+    if "after" in payload:
+        stmt = stmt.where(AuditRow.id > int(payload["after"]))
+    if actor is not None:
+        stmt = stmt.where(AuditRow.actor_id == actor)
+    if action is not None:
+        if action not in ACTION_ENUM:
+            raise AppError("invalid", "unknown action filter")
+        stmt = stmt.where(AuditRow.action == action)
+    if item is not None:
+        stmt = stmt.where(AuditRow.item_name == item)
+    for param, col_op in (("from", "ge"), ("to", "le")):
+        raw = request.query_params.get(param)
+        if raw is not None:
+            try:
+                ts = datetime.fromisoformat(raw)
+            except ValueError:
+                raise AppError("invalid", f"{param} must be ISO 8601") from None
+            if ts.tzinfo is None:
+                raise AppError("invalid", f"{param} must carry a timezone")
+            stmt = stmt.where(
+                AuditRow.ts >= ts if col_op == "ge" else AuditRow.ts <= ts
+            )
+    async with request.app.state.session_maker() as session:
+        rows = list((await session.execute(stmt.limit(page + 1))).scalars())
+    has_more = len(rows) > page
+    rows = rows[:page]
+    next_cursor = None
+    if has_more and rows:
+        next_cursor = mint_cursor({"after": rows[-1].id}, pepper, "admin_audit", p.plane)
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "ts": r.ts.isoformat(),
+                "actor_kind": r.actor_kind,
+                "actor_id": r.actor_id,
+                "actor_label": r.actor_label,
+                "action": r.action,
+                "item_name": r.item_name,
+                "ok": r.ok,
+                "detail": r.detail,
+            }
+            for r in rows
+        ],
+        "next_cursor": next_cursor,
+    }
