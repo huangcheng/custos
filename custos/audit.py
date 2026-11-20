@@ -47,7 +47,7 @@ DETAIL_KEYS: frozenset[str] = frozenset(
     {
         "pre_revision", "revision", "evicted", "evicted_ids", "dropped_unreadable",
         "codes_consumed", "count", "remaining", "skipped", "key_id", "break_glass",
-        "allow_sensitive", "ip", "stage", "reason", "created",
+        "allow_sensitive", "ip", "stage", "reason", "created", "pruned",
     }
 )
 
@@ -224,6 +224,39 @@ def _validate_detail(detail: dict[str, object]) -> None:
                 _check_scalar(item)
         else:
             _check_scalar(value)
+
+
+def add_audit_row(
+    session: AsyncSession,
+    *,
+    actor_kind: str,
+    actor_id: str | None,
+    actor_label: str,
+    action: str,
+    item_name: str | None,
+    ok: bool,
+    detail: dict[str, object],
+) -> None:
+    """In-transaction success audit: validates the closed sets and adds the
+    row to the CALLER's session so it commits (or rolls back) with the write.
+    Failure audits use record_audit's independent transaction instead."""
+    if action not in ACTION_ENUM:
+        raise ValueError(f"audit action {action!r} is not in the closed enum")
+    if actor_kind not in ACTOR_KINDS:
+        raise ValueError(f"actor kind {actor_kind!r} is not in the closed enum")
+    _validate_actor(actor_kind, actor_id)
+    _validate_detail(detail)
+    session.add(
+        AuditRow(
+            actor_kind=actor_kind,
+            actor_id=actor_id,
+            actor_label=actor_label,
+            action=action,
+            item_name=item_name,
+            ok=ok,
+            detail=detail,
+        )
+    )
 
 
 async def record_audit(

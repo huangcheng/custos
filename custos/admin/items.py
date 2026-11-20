@@ -289,13 +289,11 @@ async def purge(
     first, then fields, then the item row (no FK cascade reliance). The
     success audit commits WITH the deletion — a rolled-back purge leaves
     no ok:true row."""
-    from custos.audit import _validate_actor, _validate_detail
-    from custos.db.models import AuditRow
+    from custos.audit import add_audit_row
 
     # engine-level operator guard (mirrors force_drop): purge is session-only
     if p.actor_kind != "operator_session":
         raise AppError("session_required", "purge is session-only")
-    _validate_actor(p.actor_kind, p.actor_id)
     item = (
         await session.execute(
             select(Item).where(Item.name == name).with_for_update()
@@ -310,16 +308,8 @@ async def purge(
     await session.delete(item)
     await session.flush()
     total = int(hist.rowcount) + int(flds.rowcount) + 1  # type: ignore[attr-defined]
-    detail: dict[str, object] = {"count": total}
-    _validate_detail(detail)
-    session.add(
-        AuditRow(
-            actor_kind=p.actor_kind,
-            actor_id=p.actor_id,
-            actor_label=p.actor_label,
-            action="purge",
-            item_name=name,
-            ok=True,
-            detail=detail,
-        )
+    add_audit_row(
+        session,
+        actor_kind=p.actor_kind, actor_id=p.actor_id, actor_label=p.actor_label,
+        action="purge", item_name=name, ok=True, detail={"count": total},
     )

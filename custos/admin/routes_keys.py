@@ -16,8 +16,8 @@ from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import delete, select
 
 from custos.admin.auth import AdminPrincipal, require_admin, require_session_only
-from custos.audit import record_audit
-from custos.db.models import AgentKey, AuditRow, OperatorToken, StepUpToken
+from custos.audit import add_audit_row, record_audit
+from custos.db.models import AgentKey, OperatorToken, StepUpToken
 from custos.errors import AppError
 from custos.keys import mint_agent_key
 from custos.operator_tokens import mint_operator_token
@@ -56,19 +56,10 @@ def _parse_expiry(raw: Any) -> datetime | None:
 def _audit_in_txn(
     session: Any, p: AdminPrincipal, action: str, detail: dict[str, object]
 ) -> None:
-    from custos.audit import ACTION_ENUM, ACTOR_KINDS, _validate_actor, _validate_detail
-
-    if action not in ACTION_ENUM:
-        raise ValueError(f"audit action {action!r} is not in the closed enum")
-    if p.actor_kind not in ACTOR_KINDS:
-        raise ValueError(f"actor kind {p.actor_kind!r} is not in the closed enum")
-    _validate_actor(p.actor_kind, p.actor_id)
-    _validate_detail(detail)
-    session.add(
-        AuditRow(
-            actor_kind=p.actor_kind, actor_id=p.actor_id, actor_label=p.actor_label,
-            action=action, item_name=None, ok=True, detail=detail,
-        )
+    add_audit_row(
+        session,
+        actor_kind=p.actor_kind, actor_id=p.actor_id, actor_label=p.actor_label,
+        action=action, item_name=None, ok=True, detail=detail,
     )
 
 

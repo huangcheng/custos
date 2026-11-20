@@ -12,7 +12,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 
-from custos.admin.auth import AdminPrincipal, require_admin
+from custos.admin.auth import AdminPrincipal, require_admin, require_session_only
 from custos.audit import record_audit
 from custos.db.models import OperatorSession, StepUpToken
 from custos.errors import AppError
@@ -26,6 +26,7 @@ from custos.rekey import (
     validate_run,
     verify_batch,
 )
+from custos.retention import run_retention
 from custos.routes_agent import _json_body
 
 router = APIRouter(prefix="/api/admin")
@@ -131,3 +132,15 @@ async def get_rekey_audit(
     """Plain admin auth, metadata only, not audited (§4 enumeration read)."""
     async with request.app.state.session_maker() as session:
         return await rekey_audit(session, request.app.state.vault)
+
+
+@router.post("/retention")
+async def post_retention(
+    request: Request, p: AdminPrincipal = Depends(require_session_only)
+) -> dict[str, int]:
+    async with request.app.state.session_maker() as session:
+        counts = await run_retention(
+            session, p, request.app.state.settings.retention_days
+        )
+        await session.commit()
+    return counts
