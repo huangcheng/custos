@@ -37,13 +37,18 @@ PW = "cu-test-password-12ch"
 @pytest.fixture
 def admin_stack(pg_db: str):
     @asynccontextmanager
-    async def build():
+    async def build(*, keyring: str | None = None):
+        extra = {"CUSTOS_SECRETS_KEY": keyring} if keyring else {}
         settings = load_settings(env(CUSTOS_DATABASE_URL=pg_db, CUSTOS_SKIP_MIGRATE="1",
-                                     CUSTOS_INSECURE_DEV="1"))
+                                     CUSTOS_INSECURE_DEV="1", **extra))
         app = create_app(settings)
         engine = create_async_engine(pg_db)
         maker = async_sessionmaker(engine, expire_on_commit=False)
         async with maker() as s:
+            # shared DB: earlier files may leave credential failures that
+            # trip the per-IP lockout on this test's logins
+            await s.execute(delete(AuthEvent))
+            await s.execute(delete(LockoutSuppression))
             acct = (await s.execute(select(OperatorAccount))).scalar_one_or_none()
             if acct is None:
                 s.add(OperatorAccount(id=1, username="operator",
@@ -93,6 +98,32 @@ def admin_stack(pg_db: str):
                     }
                 finally:
                     async with maker() as s:
+                        # restore the operator blob to the DEFAULT keyring (k1):
+                        # rekey tests move it to k2, which other apps cannot open
+                        acct = (await s.execute(select(OperatorAccount))).scalar_one_or_none()
+                        if acct is not None and acct.totp_secret is not None:
+                            from custos.crypto import Vault, parse_keyring
+                            from tests.test_config import FAKE_KEYRING
+
+                            # reseal ONLY when the stored version is absent from
+                            # the default ring — corrupt blobs must stay corrupt
+                            # for later degraded-mode tests
+                            default_ring = parse_keyring(FAKE_KEYRING)
+                            if acct.totp_key_version not in default_ring:
+                                from custos.crypto import UnreadableError
+
+                                try:
+                                    raw = Vault(parse_keyring(settings.keyring_raw)).open(
+                                        "operator:totp", "", acct.totp_secret,
+                                        acct.totp_key_version,
+                                    )
+                                except UnreadableError:
+                                    acct.totp_secret, acct.totp_key_version = None, None
+                                else:
+                                    blob, ver = Vault(default_ring).seal(
+                                        "operator:totp", "", raw
+                                    )
+                                    acct.totp_secret, acct.totp_key_version = blob, ver
                         await s.execute(delete(StepUpToken))
                         await s.execute(delete(WebAuthnChallenge))
                         await s.execute(delete(DeviceCode))
