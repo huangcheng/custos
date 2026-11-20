@@ -76,3 +76,6 @@ packages/*/dist/
 console/node_modules/
 console/dist/
 mcp/node_modules/
+
+# rust CLI build artifacts
+cli/target/

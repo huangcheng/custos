@@ -1,0 +1,30 @@
+[package]
+name = "custos-cli"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Operator CLI for a Custos credential vault"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "custos"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+dirs = "5"
+rpassword = "7"
+# break-glass only (§9): direct DB access, never used by the HTTP commands
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+argon2 = "0.5"
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[dev-dependencies]
+tempfile = "3"

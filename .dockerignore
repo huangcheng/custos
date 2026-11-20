@@ -40,6 +40,8 @@ cli/
 packages/
 # the wrapper ships as its own npm package; the server image never needs it
 mcp/
+# the CLI is distributed as a release binary and built in its own stage
+cli/target/
 .agents/
 .claude/
 .zcode/
