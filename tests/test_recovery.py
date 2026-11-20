@@ -46,6 +46,9 @@ async def maker(pg_db: str):
             acct.totp_enabled = False
         from sqlalchemy import delete
 
+        from custos.db.models import AgentKey
+
+        await s.execute(delete(AgentKey))
         await s.execute(delete(StepUpToken))  # before sessions (FK)
         await s.execute(delete(WebAuthnChallenge))
         await s.execute(delete(RecoveryCode))
@@ -363,3 +366,38 @@ async def test_password_change_lockout_gated(rec_http) -> None:
                                      "new_password": "cu-test-new-password-12ch"})
         assert r2.status_code == 429
         assert r2.json()["code"] == "locked_out"
+
+
+async def test_agent_keys_survive_a_password_change(maker) -> None:
+    """§11: agent keys are never revoked by operator credential resets.
+
+    Rotation is per-key (revoke); a mass revocation would break every working
+    agent the moment the operator rotates a compromised password.
+    """
+    from custos.db.models import AgentKey
+    from custos.operator.sessions import create_session
+
+    async with maker() as s:
+        # two agent keys, one already revoked, plus the operator's own session
+        s.add(AgentKey(key_id="aaaaaaaaaaaa", digest=bytes(32), label="live-agent",
+                       mode="read", scopes=["*"]))
+        s.add(AgentKey(key_id="bbbbbbbbbbbb", digest=bytes(32), label="dead-agent",
+                       mode="read", scopes=["*"]))
+        row_full, _ = await create_session(s)
+        await s.commit()
+        full_id = row_full.id
+
+    async with maker() as s:
+        s2 = await s.get(OperatorSession, full_id)
+        await change_password(
+            s, s2, current=PW, new="cu-test-new-password-12ch", pepper=PEPPER
+        )
+        await s.commit()
+
+    async with maker() as s:
+        keys = (await s.execute(select(AgentKey))).scalars().all()
+        assert len(keys) == 2, "no agent key was deleted"
+        live = next(k for k in keys if k.key_id == "aaaaaaaaaaaa")
+        assert live.revoked_at is None, "a password change must not revoke agent keys"
+        # the row survives with its digest intact (still verifiable)
+        assert live.digest == bytes(32)
