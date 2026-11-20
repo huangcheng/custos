@@ -21,6 +21,7 @@ from custos.rekey import (
     mint_run,
     mint_scan_cursor,
     read_scan_cursor,
+    rekey_audit,
     rekey_batch,
     validate_run,
     verify_batch,
@@ -114,3 +115,19 @@ async def post_rekey(
     request: Request, p: AdminPrincipal = Depends(require_admin)
 ) -> dict[str, Any]:
     return await _run_sweep(request, p, "rekey")
+
+
+@router.post("/rekey/verify")
+async def post_verify(
+    request: Request, p: AdminPrincipal = Depends(require_admin)
+) -> dict[str, Any]:
+    return await _run_sweep(request, p, "rekey_verify")
+
+
+@router.get("/rekey/audit")
+async def get_rekey_audit(
+    request: Request, p: AdminPrincipal = Depends(require_admin)
+) -> dict[str, Any]:
+    """Plain admin auth, metadata only, not audited (§4 enumeration read)."""
+    async with request.app.state.session_maker() as session:
+        return await rekey_audit(session, request.app.state.vault)

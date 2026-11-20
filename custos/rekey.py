@@ -324,3 +324,49 @@ async def verify_batch(
     session: AsyncSession, vault: Vault, cursor_payload: dict[str, Any]
 ) -> dict[str, Any]:
     return await _sweep_batch(session, vault, cursor_payload, reseal=False)
+
+
+async def rekey_audit(session: AsyncSession, vault: Vault) -> dict[str, Any]:
+    """SQL-only per-version row counts (ciphertext rows only — NULL versions
+    never count) plus affected item names per non-newest version. No
+    decryption: corruption under an available version is verify's job."""
+    from custos.db.models import Item
+
+    versions: dict[str, dict[str, int]] = {"fields": {}, "history": {}, "operator": {}}
+    affected: dict[str, list[str]] = {}
+    newest = vault.current_version
+    for table, key in (("fields", "fields"), ("field_history", "history")):
+        model = Field if table == "fields" else FieldHistory
+        rows = (
+            await session.execute(
+                select(model.key_version, func.count())
+                .where(model.key_version.is_not(None))
+                .group_by(model.key_version)
+            )
+        ).all()
+        versions[key] = {str(v): int(n) for v, n in rows}
+        names = (
+            await session.execute(
+                select(model.key_version, Item.name)
+                .join(Item, Item.id == model.item_id)
+                .where(model.key_version.is_not(None), model.key_version != newest)
+                .distinct()
+                .order_by(model.key_version, Item.name)
+            )
+        ).all()
+        seen: dict[str, set[str]] = {}
+        for v, name in names:
+            bucket = affected.setdefault(str(v), [])
+            seen_bucket = seen.setdefault(str(v), set())
+            if name not in seen_bucket:
+                seen_bucket.add(name)
+                bucket.append(name)
+    op_rows = (
+        await session.execute(
+            select(OperatorAccount.totp_key_version, func.count())
+            .where(OperatorAccount.totp_key_version.is_not(None))
+            .group_by(OperatorAccount.totp_key_version)
+        )
+    ).all()
+    versions["operator"] = {str(v): int(n) for v, n in op_rows}
+    return {"versions": versions, "affected": affected, "newest": newest}
