@@ -22,7 +22,7 @@ from custos.admin.items import (
     reveal,
 )
 from custos.errors import AppError
-from custos.items import create_item, patch_item, put_item, soft_delete
+from custos.items import create_item, force_drop, patch_item, put_item, soft_delete
 from custos.routes_agent import _etag, _json_body, _page_limit, list_via_engine
 
 router = APIRouter(prefix="/api/admin")
@@ -250,3 +250,17 @@ async def purge_one(
         await purge(session, p, name)
         await session.commit()
     return Response(status_code=204)
+
+
+@router.post("/items/{name}/force-drop")
+async def force_drop_one(
+    name: str, request: Request,
+    p: AdminPrincipal = Depends(require_session_only),
+) -> dict[str, int]:
+    async with request.app.state.session_maker() as session:
+        dropped = await force_drop(
+            session, request.app.state.session_maker, request.app.state.vault,
+            p, name, actor_kind="operator_session",
+        )
+        await session.commit()
+    return {"dropped_unreadable": dropped}

@@ -142,3 +142,101 @@ async def test_degraded_restore_and_purge(admin_stack) -> None:
         r = await client.delete("/api/admin/items/lc/purge",
                                 headers={**hdr, "x-step-up-token": su})
         assert r.status_code == 204
+
+
+async def test_force_drop_drops_only_unreadable(admin_stack) -> None:
+    async with admin_stack() as (client, maker, h):
+        csrf = await h["login"](client)
+        hdr = {"x-csrf-token": csrf}
+        await client.post("/api/admin/items", headers=hdr,
+                          json=body("fd", fields=[
+                              {"name": "BAD", "secret": True, "value": SENTINEL},
+                              {"name": "GOOD", "secret": True, "value": SENTINEL + "g"},
+                          ]))
+        # history snapshot for BAD, then corrupt BAD live + its history row
+        await client.put("/api/admin/items/fd", headers=hdr,
+                         json=body(fields=[
+                             {"name": "BAD", "secret": True, "value": SENTINEL + "2"},
+                             {"name": "GOOD", "secret": True, "value": SENTINEL + "g"},
+                         ]))
+        async with maker() as s:
+            item = (await s.execute(select(Item).where(Item.name == "fd"))).scalar_one()
+            f = (await s.execute(select(Field).where(
+                Field.item_id == item.id, Field.name == "BAD"))).scalar_one()
+            blob = bytearray(f.ciphertext)
+            blob[-1] ^= 0xFF
+            await s.execute(update(Field).where(Field.id == f.id)
+                            .values(ciphertext=bytes(blob)))
+            hist = (await s.execute(select(FieldHistory).where(
+                FieldHistory.item_id == item.id))).scalars().all()
+            for row in hist:
+                hb = bytearray(row.ciphertext)
+                hb[-1] ^= 0xFF
+                await s.execute(update(FieldHistory).where(FieldHistory.id == row.id)
+                                .values(ciphertext=bytes(hb)))
+            await s.commit()
+        su = await h["step_up"](client, csrf)
+        r = await client.post("/api/admin/items/fd/force-drop",
+                              headers={**hdr, "x-step-up-token": su})
+        assert r.status_code == 200, r.text
+        assert r.json()["dropped_unreadable"] == 2  # live BAD + its snapshot
+        async with maker() as s:
+            item = (await s.execute(select(Item).where(Item.name == "fd"))).scalar_one()
+            names = (await s.execute(select(Field.name).where(
+                Field.item_id == item.id))).scalars().all()
+        assert names == ["GOOD"]  # readable kept, item row + name kept
+        su = await h["step_up"](client, csrf)
+        r = await client.get("/api/admin/items/fd/reveal",
+                             headers={"x-step-up-token": su})
+        assert r.status_code == 200
+        assert any(f.get("value") == SENTINEL + "g" for f in r.json()["fields"])
+
+
+async def test_force_drop_gates(admin_stack) -> None:
+    async with admin_stack() as (client, maker, h):
+        csrf = await h["login"](client)
+        hdr = {"x-csrf-token": csrf}
+        # token (any flag) → 403 before state, even on absent names
+        client.cookies.clear()
+        sens = await h["mint_co"](allow_sensitive=True)
+        r = await client.post("/api/admin/items/ghost/force-drop", headers=bearer(sens))
+        assert r.status_code == 403 and r.json()["code"] == "session_required"
+        # session without step-up → 401
+        csrf = await h["login"](client)  # fresh session + csrf after cookie clear
+        hdr = {"x-csrf-token": csrf}
+        r = await client.post("/api/admin/items/ghost/force-drop", headers=hdr)
+        assert r.status_code == 401
+        # session + step-up + absent name → 404
+        su = await h["step_up"](client, csrf)
+        r = await client.post("/api/admin/items/ghost/force-drop",
+                              headers={**hdr, "x-step-up-token": su})
+        assert r.status_code == 404
+
+
+async def test_degraded_remedy_chain(admin_stack) -> None:
+    async with admin_stack() as (client, maker, h):
+        csrf = await h["login"](client)
+        hdr = {"x-csrf-token": csrf}
+        await _seed(client, csrf, name="rem")
+        await _corrupt(maker, name="rem")
+        # masked get shows unavailable
+        r = await client.get("/api/admin/items/rem")
+        assert {"name": "KEY", "secret": True, "unavailable": True} in r.json()["fields"]
+        # writes fail 500 (notes-only too)
+        r = await client.patch("/api/admin/items/rem", headers=hdr, json={"notes": "x"})
+        assert r.status_code == 500 and r.json()["code"] == "key_unavailable"
+        # force-drop → writable again
+        su = await h["step_up"](client, csrf)
+        r = await client.post("/api/admin/items/rem/force-drop",
+                              headers={**hdr, "x-step-up-token": su})
+        assert r.status_code == 200 and r.json()["dropped_unreadable"] == 1
+        r = await client.patch("/api/admin/items/rem", headers=hdr, json={"notes": "x"})
+        assert r.status_code == 200
+        # soft-deleted item stays 404 to agents after force-drop (no undelete)
+        await client.delete("/api/admin/items/rem", headers=hdr)
+        su = await h["step_up"](client, csrf)
+        r = await client.post("/api/admin/items/rem/force-drop",
+                              headers={**hdr, "x-step-up-token": su})
+        assert r.status_code == 200
+        r = await client.get("/api/admin/items/rem")
+        assert r.status_code == 200 and r.json()["deleted"] is True
