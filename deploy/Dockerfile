@@ -1,3 +1,18 @@
+# ---- console build ----------------------------------------------------------
+# Node only exists in this stage: the runtime image stays Python-only.
+# The output is architecture-independent, so build it on the native platform
+# even when the runtime image is cross-built.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS console-build
+WORKDIR /build
+COPY console/package.json console/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY console/ ./
+# An incomplete dist would make the app serve a JSON 404 for / and look
+# "fine" at runtime: fail the BUILD instead.
+RUN npm run build && test -f dist/index.html
+
+
+# ---- runtime ---------------------------------------------------------------
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -15,7 +30,13 @@ COPY alembic.ini ./
 COPY alembic ./alembic
 RUN uv sync --frozen --no-dev --no-cache
 
-ENV HOME=/home/custos PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:$PATH"
+# The operator console (static SPA). Without it the API still works and
+# GET / answers a JSON 404.
+COPY --from=console-build /build/dist ./console/dist
+RUN test -f ./console/dist/index.html
+
+ENV HOME=/home/custos PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:$PATH" \
+    CUSTOS_CONSOLE_DIST=/app/console/dist
 USER custos
 EXPOSE 8300
 ENTRYPOINT []

@@ -4,17 +4,17 @@ dev/
 .gitignore
 .env
 .env.*
-*.pem
-*.key
-*.keyring
-*.pepper
-keyring.txt
-keyring.json
-pepper.txt
-custos-keyring*
-custos-pepper*
-custos-keyring*
-custos-pepper*
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.keyring
+**/*.pepper
+**/keyring.txt
+**/keyring.json
+**/pepper.txt
+**/custos-keyring*
+**/custos-pepper*
 *.backup
 *.sql.bz2
 .envrc
@@ -23,7 +23,7 @@ custos-pepper*
 *.dump
 *.sql
 *.sql.gz
-secrets/
+**/secrets/
 .superpowers/
 .venv/
 __pycache__/
@@ -38,10 +38,12 @@ docs/
 dashboard/
 cli/
 packages/
+# the wrapper ships as its own npm package; the server image never needs it
+mcp/
 .agents/
 .claude/
 .zcode/
-*.local
+**/*.local
 scripts/node_modules/
 *.egg-info/
 .coverage
@@ -49,3 +51,5 @@ htmlcov/
 coverage.xml
 dist/
 build/
+console/node_modules/
+console/dist/
