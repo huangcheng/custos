@@ -120,15 +120,13 @@ pub async fn unlock(dsn: &str, ip: Option<&str>) -> Result<(), CliError> {
 /// `custos account reset-password` — new Argon2id hash, all sessions/step-ups
 /// gone, operator tokens revoked, recovery codes consumed (§9).
 pub async fn reset_password(dsn: &str) -> Result<(), CliError> {
-    let plain = rpassword::prompt_password("new password: ")
-        .map_err(|e| CliError::Io(format!("cannot read the password: {e}")))?;
+    let plain = crate::commands::prompt_secret("new password: ")?;
     if plain.chars().count() < 12 {
         return Err(CliError::Config(
             "the password must be at least 12 characters".into(),
         ));
     }
-    let confirm = rpassword::prompt_password("repeat the password: ")
-        .map_err(|e| CliError::Io(format!("cannot read the password: {e}")))?;
+    let confirm = crate::commands::prompt_secret("repeat the password: ")?;
     if plain != confirm {
         return Err(CliError::Config("the passwords do not match".into()));
     }

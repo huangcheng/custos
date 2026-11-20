@@ -60,9 +60,8 @@ pub async fn login(url: Option<&str>) -> Result<(), CliError> {
         ));
     }
 
-    let username = prompt("username: ")?;
-    let password = rpassword::prompt_password("password: ")
-        .map_err(|e| CliError::Io(format!("cannot read the password: {e}")))?;
+    let username = super::prompt_line("username: ")?;
+    let password = super::prompt_secret("password: ")?;
 
     let mut body = serde_json::json!({ "username": username, "password": password });
     let totp_required = status
@@ -70,7 +69,7 @@ pub async fn login(url: Option<&str>) -> Result<(), CliError> {
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     if totp_required {
-        body["totp"] = serde_json::Value::String(prompt("authenticator code: ")?);
+        body["totp"] = serde_json::Value::String(super::prompt_line("authenticator code: ")?);
     }
 
     let anonymous = Client::new(&base_url, Credentials::EnvToken(String::new()))?;
@@ -105,23 +104,4 @@ pub async fn login(url: Option<&str>) -> Result<(), CliError> {
     session::save(&session)?;
     println!("signed in");
     Ok(())
-}
-
-fn prompt(what: &str) -> Result<String, CliError> {
-    use std::io::{BufRead, Write};
-    print!("{what}");
-    std::io::stdout()
-        .flush()
-        .map_err(|e| CliError::Io(e.to_string()))?;
-    let mut line = String::new();
-    std::io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(|e| CliError::Io(e.to_string()))?;
-    Ok(line.trim().to_string())
-}
-
-#[allow(dead_code)]
-fn _pinned(_: &str) -> Result<String, CliError> {
-    breakglass::hash_password("x")
 }

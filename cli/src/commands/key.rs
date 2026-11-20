@@ -108,8 +108,7 @@ pub async fn prompt_step_up(client: &Client) -> Result<String, CliError> {
                 .into(),
         ));
     }
-    let password = rpassword::prompt_password("step-up password: ")
-        .map_err(|e| CliError::Io(format!("cannot read the password: {e}")))?;
+    let password = super::prompt_secret("step-up password: ")?;
     let mut body = serde_json::json!({ "password": password });
 
     // TOTP is required only when the account has it enabled.
@@ -122,12 +121,12 @@ pub async fn prompt_step_up(client: &Client) -> Result<String, CliError> {
             .and_then(Value::as_bool)
             .unwrap_or(false)
         {
-            body["totp"] = Value::String(prompt_line(
+            body["totp"] = Value::String(super::prompt_line(
                 "authenticator code (or - for a recovery code): ",
             )?);
             if body["totp"] == Value::String("-".into()) {
                 body.as_object_mut().unwrap().remove("totp");
-                body["recovery_code"] = Value::String(prompt_line("recovery code: ")?);
+                body["recovery_code"] = Value::String(super::prompt_line("recovery code: ")?);
             }
         }
     }
@@ -146,18 +145,4 @@ pub async fn prompt_step_up(client: &Client) -> Result<String, CliError> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| CliError::Config("step-up returned no token".into()))
-}
-
-fn prompt_line(what: &str) -> Result<String, CliError> {
-    use std::io::{BufRead, Write};
-    print!("{what}");
-    std::io::stdout()
-        .flush()
-        .map_err(|e| CliError::Io(e.to_string()))?;
-    let mut line = String::new();
-    std::io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(|e| CliError::Io(e.to_string()))?;
-    Ok(line.trim().to_string())
 }

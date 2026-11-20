@@ -47,7 +47,9 @@ pub enum ItemCommand {
 pub async fn run(client: &Client, cmd: ItemCommand, as_json: bool) -> Result<(), CliError> {
     match cmd {
         ItemCommand::List { cursor } => {
-            let mut path = "/api/items?limit=50".to_string();
+            // operator-facing: the admin list, never the agent plane (which
+            // only accepts cu- keys)
+            let mut path = "/api/admin/items?limit=50".to_string();
             if let Some(cursor) = cursor {
                 // an opaque cursor may contain '+' or '&': encode it
                 path.push_str(&format!("&cursor={}", urlencode(&cursor)));
@@ -103,13 +105,29 @@ pub async fn run(client: &Client, cmd: ItemCommand, as_json: bool) -> Result<(),
                     .unwrap_or_default(),
             };
             let body = json!({ "notes": notes, "fields": fields });
-            let out = client
-                .put(
-                    RouteClass::TokenPermitted,
-                    &format!("/api/admin/items/{}", Client::seg(&name)),
-                    Some(body),
-                )
-                .await?;
+            // "create or replace": the admin PUT has no upsert flag, so create
+            // when the name is absent and replace when it exists.
+            let item_path = format!("/api/admin/items/{}", Client::seg(&name));
+            let exists = client
+                .get(RouteClass::SessionOnly, &item_path)
+                .await
+                .is_ok();
+            let out = if exists {
+                client
+                    .put(RouteClass::TokenPermitted, &item_path, Some(body))
+                    .await?
+            } else {
+                let mut create = body;
+                create["name"] = json!(name);
+                client
+                    .post(
+                        RouteClass::TokenPermitted,
+                        "/api/admin/items",
+                        Some(create),
+                        None,
+                    )
+                    .await?
+            };
             print_revision(&out);
         }
         ItemCommand::Rm { name } => {
