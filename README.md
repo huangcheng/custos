@@ -35,26 +35,72 @@ admin env, rekey, and restore accept an `allow_sensitive` token instead.
 
 ## Quick start
 
+Custos needs four things before it will start: a database password, a keyring,
+a pepper, and the four deployment variables the compose file requires. This
+block is the whole of it — copy it, edit the two `<…>` values, run it.
+
 ```bash
-# 1. create the secrets the app needs (all 0600)
-mkdir -p ./secrets
-openssl rand 32 | basenc --base64url -w0 | tr -d '=' \
-  | sed 's/^/k1:/' > ./secrets/keyring
-openssl rand 32 | basenc --base64url -w0 | tr -d '=' > ./secrets/pepper
-printf 'postgresql+asyncpg://custos:%s@db:5432/custos\n' "$DB_PASSWORD" \
+# 1. secrets (0600 files in a 0700 directory)
+mkdir -p -m 0700 ./secrets
+# base64url, no padding. `basenc` is GNU coreutils; the python fallback works
+# everywhere else (macOS, minimal images).
+gen_key() {
+  if command -v basenc >/dev/null 2>&1; then
+    openssl rand 32 | basenc --base64url -w0 | tr -d '='
+  else
+    python3 -c 'import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("="))'
+  fi
+}
+printf 'k1:%s\n' "$(gen_key)" > ./secrets/keyring
+gen_key > ./secrets/pepper
+chmod 600 ./secrets/keyring ./secrets/pepper
+
+# 2. the deployment variables (put these in a file you gitignore, or export them)
+export CUSTOS_DB_PASSWORD='<a URL-safe random string, e.g. from gen_key>'
+export CUSTOS_SECRETS_DIR="$PWD/secrets"
+export CUSTOS_TRUSTED_PROXIES='127.0.0.1/32'          # your reverse proxy's CIDR
+export CUSTOS_ALLOWED_ORIGINS='https://vault.example'  # the browser origin
+export CUSTOS_WEBAUTHN_RP_ID='vault.example'          # bare host of that origin
+printf 'postgresql+asyncpg://custos:%s@db:5432/custos\n' "$CUSTOS_DB_PASSWORD" \
   > ./secrets/database-url
-chmod 600 ./secrets/*
+chmod 600 ./secrets/database-url
 
-# 2. start it (see deploy/docker-compose.yml for every variable)
-CUSTOS_SECRETS_DIR=./secrets docker compose -f deploy/docker-compose.yml up -d
+# 3. start it
+docker compose -f deploy/docker-compose.yml up -d
 
-# 3. read the one-shot setup code and finish setup in the console
+# 4. the one-shot setup code, then finish setup in the console
 docker compose -f deploy/docker-compose.yml exec app cat /var/lib/custos/setup-code
 ```
 
-Then open the console, paste the setup code, choose a password, and enable
-TOTP. From there: **Keys → Mint** produces the first agent key — the token is
-shown once.
+The console is published on loopback (`http://127.0.0.1:8300`) by default. For a
+real deployment put your own TLS-terminating proxy in front and point
+`CUSTOS_ALLOWED_ORIGINS` / `CUSTOS_WEBAUTHN_RP_ID` at its public origin — see
+[`docs/operations.md`](docs/operations.md).
+
+Then: paste the setup code, choose a password, enable TOTP, and **Keys → Mint**
+produces the first agent key (shown once).
+
+### Passkeys are optional
+
+`CUSTOS_WEBAUTHN_RP_ID` and `CUSTOS_ALLOWED_ORIGINS` are a both-or-neither pair.
+If you do not want passkeys, unset *both* and the endpoints return 404 with
+`auth/status` reporting `passkey_available: false`. The compose file requires
+them because its default deployment enables passkeys.
+
+### Checking the secrets by hand
+
+The app refuses to start on a malformed keyring or an all-zero pepper. To check
+before starting:
+
+```bash
+python3 - <<'PY'
+import base64, pathlib
+for entry in pathlib.Path("secrets/keyring").read_text().strip().split(","):
+    version, _, value = entry.partition(":")
+    raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    print(version, len(raw), "bytes", "OK" if len(raw) == 32 else "BAD")
+PY
+```
 
 ## Configuration
 
@@ -70,16 +116,21 @@ The full table lives in `.env.example`. The rules that bite:
 
 ## The CLI
 
-The image ships a `custos` binary for scripting and break-glass:
+The image ships a `custos` binary at `/app/bin/custos` for scripting and
+break-glass. It is not installed on the host, so run it through the container
+(or copy it out — it is a self-contained binary):
 
 ```bash
-custos login                     # password + TOTP, or the device hand-off
-custos item set svc --fields-file ./fields.json
-custos item get svc              # secrets masked
-custos env svc                   # export NAME='value', eval-safe
-custos key mint --label ci --mode read --scope 'stock-*'
-custos audit --action key.mint
-custos account unlock            # break-glass: direct database, host shell = authz
+C="docker compose -f deploy/docker-compose.yml exec -T app /app/bin/custos"
+export CUSTOS_URL=http://127.0.0.1:8300   # or pass --url to every command
+
+$C login                         # password + TOTP, or the device hand-off
+$C item set svc --fields-file ./fields.json   # values never in argv
+$C item get svc                  # secrets masked
+$C env svc                       # export NAME='value', eval-safe
+$C key mint --label ci --mode read --scope 'stock-*'
+$C audit --action key.mint
+$C account unlock                # break-glass: direct DB, host shell = authz
 ```
 
 `CUSTOS_OPERATOR_TOKEN` is the non-interactive path. Secret *values* are never
