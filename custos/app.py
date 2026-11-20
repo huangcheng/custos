@@ -276,4 +276,8 @@ def create_app(settings: Settings) -> FastAPI:
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
+    from custos.console import mount_console
+
+    mount_console(app, settings)  # AFTER the routers: the fallback shadows nothing
+
     return app

@@ -40,6 +40,7 @@ class Settings:
     retention_days: int
     skip_migrate: bool
     allow_missing_key_version: bool
+    console_dist: str = ""  # CUSTOS_CONSOLE_DIST override (tests/deploy)
     trusted_proxies: tuple[Network, ...] = ()
     keyring_raw: str = field(default="", repr=False)
     pepper_raw: bytes = field(default=b"", repr=False)
@@ -309,6 +310,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         insecure_cookie=insecure_cookie,
         database_url=database_url,
         data_dir=Path(_get(env, "CUSTOS_DATA_DIR") or "/var/lib/custos"),
+        console_dist=_get(env, "CUSTOS_CONSOLE_DIST") or "",
         retention_days=retention_days,
         skip_migrate=_flag(env, "CUSTOS_SKIP_MIGRATE"),
         allow_missing_key_version=_flag(env, "CUSTOS_ALLOW_MISSING_KEY_VERSION"),

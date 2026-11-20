@@ -23,8 +23,14 @@ BASE_ENV = {
 }
 
 
+# No console unless a test asks for one: otherwise a locally built
+# console/dist would make the SPA fallback swallow every unknown path and
+# local runs would diverge from CI (dist is gitignored).
+_NO_CONSOLE = "/nonexistent/custos-console-dist"
+
+
 def env(**extra: str) -> dict[str, str]:
-    combined = {**BASE_ENV, **extra}
+    combined = {"CUSTOS_CONSOLE_DIST": _NO_CONSOLE, **BASE_ENV, **extra}
     if combined.get("CUSTOS_PUBLIC_BIND") == "1" and "CUSTOS_ALLOWED_ORIGINS" not in combined:
         combined["CUSTOS_ALLOWED_ORIGINS"] = "https://console.example"
     if combined.get("CUSTOS_ALLOWED_ORIGINS") and "CUSTOS_WEBAUTHN_RP_ID" not in combined:
