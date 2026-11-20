@@ -125,6 +125,22 @@ const PW = "cu-test-console-password";
 const SECRET_VALUE = "cu-test-console-secret-42";
 const ITEM = "cu-test-console-item";
 let n = 0;
+// textContent misses <input value>, title, placeholder — exactly where a secret
+// would most likely leak. This scans text AND attribute values.
+const leaked = (needle) =>
+  page.evaluate(({ secret }) => {
+    const inText = document.body.textContent.includes(secret);
+    const inValue = [...document.querySelectorAll("input,textarea")].some((el) =>
+      String(el.value).includes(secret),
+    );
+    const inAttr = [...document.querySelectorAll("*")].some((el) =>
+      ["title", "placeholder", "aria-label", "alt", "data-testid"].some((name) =>
+        String(el.getAttribute(name) ?? "").includes(secret),
+      ),
+    );
+    return inText || inValue || inAttr;
+  }, { secret: needle });
+
 const ok = (cond, name) => {
   n += 1;
   if (!cond) throw new Error(`CHECK ${n} FAILED: ${name}`);
@@ -213,12 +229,7 @@ await until(
   () => page.evaluate(({ item }) => document.body.textContent.includes(item), { item: ITEM }),
   "the item row",
 );
-ok(
-  await page.evaluate(({ secret }) => !document.body.textContent.includes(secret), {
-    secret: SECRET_VALUE,
-  }),
-  "secret value absent from the list DOM",
-);
+ok(!(await leaked(SECRET_VALUE)), "secret value absent from the list DOM (text, inputs, attributes)");
 
 // 4. opening the drawer still masks, and reveal is step-up gated
 await page.evaluate(({ item }) => {
@@ -240,13 +251,7 @@ await until(
     }),
   "the drawer to render its fields",
 );
-ok(
-  await page.evaluate(({ secret }) => {
-    const drawer = document.querySelector(".drawer");
-    return drawer !== null && !drawer.textContent.includes(secret);
-  }, { secret: SECRET_VALUE }),
-  "drawer masks the secret before reload",
-);
+ok(!(await leaked(SECRET_VALUE)), "drawer masks the secret before reveal (text, inputs, attributes)");
 // the drawer renders before its GET resolves: wait for the Reveal button itself
 await until(
   () =>
@@ -418,24 +423,23 @@ const MINTED_KEY = await (async () => {
   await until(
     () =>
       page.evaluate(() => {
-        const input = [...document.querySelectorAll('input[readonly]')].find((i) =>
-          i.value.startsWith("cu-"),
-        );
-        return !!input;
+        const panel = document.querySelector('[data-testid="one-time-panel"]');
+        if (!panel) return false;
+        return [...panel.querySelectorAll("input")].some((i) => i.value.startsWith("cu-"));
       }),
-    "the one-time key token",
+    "the one-time key panel",
   );
-  return page.evaluate(
-    () =>
-      [...document.querySelectorAll('input[readonly]')].find((i) =>
-        i.value.startsWith("cu-"),
-      ).value,
-  );
+  return page.evaluate(() => {
+    const panel = document.querySelector('[data-testid="one-time-panel"]');
+    return [...panel.querySelectorAll("input")].find((i) => i.value.startsWith("cu-")).value;
+  });
 })();
 ok(MINTED_KEY.startsWith("cu-"), "mint shows the token");
 ok(
-  await page.evaluate(() => document.body.textContent.includes("only time the token is shown")),
-  "the one-time warning is rendered",
+  await page.evaluate(
+    () => !!document.querySelector('[data-testid="one-time-panel"]'),
+  ),
+  "the one-time panel is rendered",
 );
 
 // 7b. the token really is one-time: it is not retrievable again after a reload
@@ -459,10 +463,8 @@ await until(
   "the inventory to list the key without its secret",
 );
 ok(
-  await page.evaluate(({ key }) => !document.body.textContent.includes(key.split(".")[1]), {
-    key: MINTED_KEY,
-  }),
-  "the token is not re-readable after a reload",
+  !(await leaked(MINTED_KEY.split(".")[1])),
+  "the token is not re-readable after a reload (text, inputs, attributes)",
 );
 
 // 8. that mint is in the audit trail

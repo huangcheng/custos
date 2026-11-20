@@ -97,7 +97,17 @@ def mount_console(app: FastAPI, settings: object) -> None:
     shell = (dist / "index.html").read_text()
     turnstile = bool(getattr(settings, "turnstile_sitekey", None))
     csp = CSP_TURNSTILE if turnstile else CSP
-    shell_headers = {"cache-control": "no-store", "content-security-policy": csp}
+    # §3 browser hardening. These are set HERE (not only in a middleware) because
+    # the shell reaches the browser through three paths: the / route, the
+    # index.html asset branch, and the 404 rewrite. All three must agree.
+    shell_headers = {
+        "cache-control": "no-store",
+        "content-security-policy": csp,
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
+        "x-frame-options": "DENY",
+        "permissions-policy": "camera=(), microphone=(), geolocation=()",
+    }
 
     assets = dist / "assets"
     if assets.is_dir():
@@ -113,7 +123,12 @@ def mount_console(app: FastAPI, settings: object) -> None:
         app.mount("/assets", _ImmutableStatic(directory=assets), name="console-assets")
 
     def _shell_response() -> Response:
-        return HTMLResponse(shell, headers=shell_headers)
+        # HTMLResponse would append its own headers; pass the full set once and
+        # override the response's defaults so no header is duplicated.
+        resp = HTMLResponse(shell)
+        for name, value in shell_headers.items():
+            resp.headers[name] = value
+        return resp
 
     @app.get("/", include_in_schema=False)
     async def _index() -> Response:
@@ -144,6 +159,10 @@ def mount_console(app: FastAPI, settings: object) -> None:
                 or path.startswith("api/")
                 or path == "mcp"
                 or path.startswith("mcp/")
+                # A missing hashed asset must 404, not become the HTML shell:
+                # serving 200 HTML for a JS import turns a stale deploy into an
+                # opaque MIME error.
+                or path.startswith("assets/")
             ):
                 await self.inner(scope, receive, send)
                 return
@@ -152,17 +171,29 @@ def mount_console(app: FastAPI, settings: object) -> None:
                 # The shell keeps its security headers no matter which URL
                 # delivered it; only hashed build output is immutable.
                 is_shell = asset.name == "index.html"
-                immutable = path.startswith("assets/")
-                cache = _ASSET_CACHE if immutable else "no-store"
-                media = _media_type(asset.suffix) or "application/octet-stream"
-                headers: list[tuple[bytes, bytes]] = [
-                    (b"cache-control", cache.encode()),
-                    (b"content-type", media.encode()),
-                ]
                 if is_shell:
-                    headers.extend(
+                    # the shell keeps exactly the route's header set (no
+                    # duplicate cache-control)
+                    headers = [
                         (k.encode(), v.encode()) for k, v in shell_headers.items()
-                    )
+                    ]
+                    headers.append((b"content-type", b"text/html; charset=utf-8"))
+                else:
+                    immutable = path.startswith("assets/")
+                    cache = _ASSET_CACHE if immutable else "no-store"
+                    media = _media_type(asset.suffix) or "application/octet-stream"
+                    headers = [
+                        (b"cache-control", cache.encode()),
+                        (b"content-type", media.encode()),
+                    ]
+                    if media.startswith("text/html"):
+                        # any HTML from dist/ is potentially renderable: give it
+                        # the same hardening as the shell, never bare HTML
+                        headers.extend(
+                            (k.encode(), v.encode())
+                            for k, v in shell_headers.items()
+                            if k != "cache-control"
+                        )
                 await send({
                     "type": "http.response.start",
                     "status": 200,
@@ -181,6 +212,9 @@ def mount_console(app: FastAPI, settings: object) -> None:
                 ):
                     # the app found no route: this is a client-side console route
                     shell_sent = True
+                    # This rewrite bypasses the inner middleware stack, so the
+                    # browser-hardening headers are added explicitly here; the
+                    # shell must not gain or lose headers by URL.
                     headers = [(k.encode(), v.encode()) for k, v in shell_headers.items()]
                     headers.append((b"content-type", b"text/html; charset=utf-8"))
                     await send({
@@ -205,6 +239,8 @@ def mount_console(app: FastAPI, settings: object) -> None:
 
 def _media_type(suffix: str) -> str | None:
     return {
+        ".html": "text/html; charset=utf-8",
+        ".txt": "text/plain; charset=utf-8",
         ".js": "application/javascript",
         ".mjs": "application/javascript",
         ".css": "text/css",

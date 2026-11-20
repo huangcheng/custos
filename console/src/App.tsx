@@ -6,6 +6,8 @@ import { Items } from "./screens/Items";
 import { Keys } from "./screens/Keys";
 import { Login } from "./screens/Login";
 import { Settings } from "./screens/Settings";
+import { OneTimePanel } from "./components/OneTimePanel";
+import { clearOneTimeForSignOut, useOneTime } from "./onetime";
 import type { AuthStatus } from "./types";
 
 type Boot =
@@ -25,6 +27,7 @@ export function App() {
   const [boot, setBoot] = useState<Boot>({ phase: "loading" });
   const [path, setPath] = useState(() => window.location.pathname);
   const [pendingDeviceCode, setPendingDeviceCode] = useState("");
+  const oneTime = useOneTime();
 
   const go = useCallback((next: string, replace = false) => {
     if (replace) window.history.replaceState(null, "", next);
@@ -82,20 +85,26 @@ export function App() {
   }, [go, resumeDeviceHandoff]);
 
   const signOut = useCallback(async () => {
+    // Session boundary: the one-time store is module-level, so a secret left
+    // undismissed would survive into the next session's panel. Clear it first.
+    clearOneTimeForSignOut();
     // Only claim we are signed out once the SERVER dropped the session: if the
     // logout call fails the cookie is still live, and showing the login screen
     // would be a lie that a refresh contradicts.
     try {
       await logout();
     } catch (err) {
-      setBoot({
-        phase: "error",
-        message:
-          err instanceof ApiError
-            ? `sign-out failed: ${err.message}`
-            : "sign-out failed; the session is still active",
-      });
-      return;
+      // a 401 means the cookie was already dead: that IS signed out
+      if (!(err instanceof ApiError && err.status === 401)) {
+        setBoot({
+          phase: "error",
+          message:
+            err instanceof ApiError
+              ? `sign-out failed: ${err.message}`
+              : "sign-out failed; the session is still active",
+        });
+        return;
+      }
     }
     try {
       const st = await fetchStatus();
@@ -133,7 +142,7 @@ export function App() {
   }
 
   if (boot.phase === "anonymous") {
-    if (path.startsWith("/device")) {
+    if (path === "/device" || path === "/device/" || path.startsWith("/device/")) {
       return (
         <Device
           onNeedsLogin={(deviceCode) => {
@@ -167,7 +176,7 @@ export function App() {
         />
       );
     }
-    if (path === "/device" || path.startsWith("/device#")) {
+    if (path === "/device" || path === "/device/" || path.startsWith("/device/")) {
       // an authenticated operator still has to be able to approve a CLI login
       return (
         <Device
@@ -214,7 +223,19 @@ export function App() {
           </button>
         </div>
       </aside>
-      <main className="workspace">{renderRoute(boot.status)}</main>
+      <main className="workspace">
+        {/* A minted secret must survive a route change: it lives above the
+            screens, not inside one. */}
+        {oneTime.oneTime ? (
+          <OneTimePanel
+            key={`${oneTime.oneTime.kind}:${oneTime.oneTime.about}`}
+            oneTime={oneTime.oneTime}
+            pending={oneTime.pending}
+            onDismiss={oneTime.dismiss}
+          />
+        ) : null}
+        {renderRoute(boot.status)}
+      </main>
     </div>
   );
 }

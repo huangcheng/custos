@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useState } from "react";
 import { ApiError, api } from "../api";
+import { useOneTime } from "../onetime";
 import { Button, Notice } from "../components/Field";
 import { deviceCodeFromHash, displayTransferCode } from "../login";
 type Props = {
@@ -19,13 +20,16 @@ type Lookup = {
 export function Device({ onNeedsLogin, onDone }: Props) {
   const [code] = useState(() => deviceCodeFromHash(window.location.hash));
   const [lookup, setLookup] = useState<Lookup | null>(null);
+  const oneTime = useOneTime();
   const [transfer, setTransfer] = useState("");
   const [deadline, setDeadline] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [notSignedIn, setNotSignedIn] = useState(false);
 
-  useEffect(() => {
+  // useLayoutEffect: strip the code BEFORE the first paint, so it is never
+  // visible in the URL bar, a screenshot or a restored tab.
+  useLayoutEffect(() => {
     if (window.location.hash) {
       window.history.replaceState(null, "", window.location.pathname);
     }
@@ -66,6 +70,15 @@ export function Device({ onNeedsLogin, onDone }: Props) {
       );
       setTransfer(data.transfer_code);
       if (data.exchange_deadline) setDeadline(data.exchange_deadline);
+      // the transfer code is one-time and short-lived: keep it above the
+      // screens so a navigation cannot lose it mid-entry
+      oneTime.show({
+        kind: "device-transfer",
+        value: data.transfer_code,
+        about: data.exchange_deadline
+          ? `CLI hand-off, enter before ${data.exchange_deadline}`
+          : "CLI hand-off",
+      });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "approval failed");
     } finally {
@@ -143,8 +156,9 @@ export function Device({ onNeedsLogin, onDone }: Props) {
               </tbody>
             </table>
             <Notice kind="warn">
-              If you did not start a CLI login, reject this and check the audit
-              log.
+              If you did not start a CLI login, close this page without approving
+              and check the audit log. Leaving it unapproved expires in a few
+              minutes.
             </Notice>
             <div className="row">
               <Button
@@ -154,7 +168,7 @@ export function Device({ onNeedsLogin, onDone }: Props) {
                 disabled={busy}
               />
               <Button
-                label="Reject"
+                label="Not mine — do not approve"
                 variant="ghost"
                 onClick={() => onNeedsLogin(code ?? "")}
               />

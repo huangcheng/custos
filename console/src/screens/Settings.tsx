@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api } from "../api";
+import { useOneTime } from "../onetime";
 import { Button, Notice, TextField } from "../components/Field";
 import { ConfirmStepUp } from "../components/ConfirmStepUp";
 import { KeyFormError, tokenExpiryBody } from "../keys";
@@ -77,7 +78,7 @@ function Account({
   const [next, setNext] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [codes, setCodes] = useState<string[] | null>(null);
+  const oneTime = useOneTime();
   const [passkeys, setPasskeys] = useState<PasskeyRow[]>([]);
   const [pending, setPending] = useState<null | ((token: string) => Promise<void>)>(null);
   const [totpSecret, setTotpSecret] = useState("");
@@ -112,7 +113,14 @@ function Account({
       setCurrent("");
       setNext("");
       setMessage("Password changed. All other sessions were signed out.");
-      if (data.recovery_codes) setCodes(data.recovery_codes);
+      if (data.recovery_codes) {
+        // promotion issues fresh codes: they must survive a route change
+        oneTime.show({
+          kind: "recovery-codes",
+          value: data.recovery_codes,
+          about: "account promotion",
+        });
+      }
       onStatusChanged();
     });
   };
@@ -175,6 +183,11 @@ function Account({
                   undefined,
                   { stepUpToken: token },
                 );
+                oneTime.show({
+                  kind: "totp-secret",
+                  value: started.secret,
+                  about: "Custos TOTP",
+                });
                 setTotpSecret(started.secret);
                 setMessage("Add this secret to your authenticator, then confirm below.");
               })
@@ -191,7 +204,11 @@ function Account({
                   undefined,
                   { stepUpToken: token },
                 );
-                setCodes(data.recovery_codes);
+                oneTime.show({
+                  kind: "recovery-codes",
+                  value: data.recovery_codes,
+                  about: "regenerated",
+                });
               })
             }
           />
@@ -221,25 +238,19 @@ function Account({
                       { code: totpCode.trim() },
                       { stepUpToken: token },
                     );
-                    setCodes(data.recovery_codes);
+                    oneTime.show({
+                      kind: "recovery-codes",
+                      value: data.recovery_codes,
+                      about: "TOTP enable",
+                    });
                     setTotpSecret("");
                     setTotpCode("");
-                    setMessage("TOTP enabled. Store the recovery codes below.");
+                    setMessage("TOTP enabled.");
                     onStatusChanged();
                   })
                 }
               />
             </div>
-          </div>
-        ) : null}
-        {codes ? (
-          <div className="card stack">
-            <Notice kind="warn">Shown once. Store these offline.</Notice>
-            <ul className="mono" style={{ columns: 2, margin: 0 }}>
-              {codes.map((code) => (
-                <li key={code}>{code}</li>
-              ))}
-            </ul>
           </div>
         ) : null}
       </div>
@@ -317,7 +328,7 @@ function Account({
 
 function Tokens({ totpRequired }: { totpRequired: boolean }) {
   const [rows, setRows] = useState<TokenRow[]>([]);
-  const [minted, setMinted] = useState<MintedToken | null>(null);
+  const oneTime = useOneTime();
   const [label, setLabel] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
   const [allowSensitive, setAllowSensitive] = useState(false);
@@ -340,15 +351,6 @@ function Tokens({ totpRequired }: { totpRequired: boolean }) {
   return (
     <div className="stack">
       {error ? <Notice kind="error">{error}</Notice> : null}
-      {minted ? (
-        <div className="card stack">
-          <Notice kind="warn">Shown once. Store it before closing this page.</Notice>
-          <input className="mono" readOnly value={minted.token} />
-          <div className="row">
-            <Button label="Done" variant="ghost" onClick={() => setMinted(null)} />
-          </div>
-        </div>
-      ) : null}
       <div className="card stack">
         <h2 className="page-sub" style={{ margin: 0 }}>
           Mint an operator token
@@ -383,7 +385,11 @@ function Tokens({ totpRequired }: { totpRequired: boolean }) {
                   const data = await api<MintedToken>("POST", "/api/admin/tokens", body, {
                     stepUpToken: token,
                   });
-                  setMinted(data);
+                  oneTime.show({
+                    kind: "operator-token",
+                    value: data.token,
+                    about: data.label,
+                  });
                   setLabel("");
                   setExpiresAt("");
                   setAllowSensitive(false);

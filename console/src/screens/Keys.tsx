@@ -1,22 +1,25 @@
 import { useCallback, useEffect, useState } from "react";
-import { ApiError, api } from "../api";
+import { ApiError, api, status } from "../api";
+import { useOneTime } from "../onetime";
 import { Button, Notice, TextField } from "../components/Field";
 import { ConfirmStepUp } from "../components/ConfirmStepUp";
 import { KeyFormError, mintKeyBody, scopeSummary, type KeyForm } from "../keys";
 import { truncate } from "../plain";
 import type { KeyRow, MintedKey } from "../types";
 
-const BLANK: KeyForm = { label: "", mode: "read", scopes: "*", expiresAt: "" };
+// Fail closed: an empty scope list grants nothing. A wildcard default on a
+// credential vault is the wrong failure mode (§5: empty scopes = no access).
+const BLANK: KeyForm = { label: "", mode: "read", scopes: "", expiresAt: "" };
 
 export function Keys({ onSignOut }: { onSignOut: () => void }) {
   const [rows, setRows] = useState<KeyRow[]>([]);
   const [form, setForm] = useState<KeyForm>(BLANK);
-  const [minted, setMinted] = useState<MintedKey | null>(null);
+
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [totpRequired, setTotpRequired] = useState(false);
   const [pending, setPending] = useState<null | ((token: string) => Promise<void>)>(null);
-  const [copied, setCopied] = useState(false);
+  const oneTime = useOneTime();
 
   const load = useCallback(async () => {
     try {
@@ -33,9 +36,11 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
 
   useEffect(() => {
     void load();
-    void api<{ totp_required: boolean }>("GET", "/api/auth/status")
+    void status()
       .then((st) => setTotpRequired(st.totp_required))
-      .catch(() => undefined);
+      .catch((err: unknown) => {
+        setError(err instanceof ApiError ? err.message : "cannot read auth status");
+      });
   }, [load]);
 
   const mint = () => {
@@ -48,7 +53,12 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
           const data = await api<MintedKey>("POST", "/api/admin/keys", body, {
             stepUpToken: token,
           });
-          setMinted(data);
+          // store it above the screens: a sidebar click must not destroy it
+          oneTime.show({
+            kind: "agent-key",
+            value: data.token,
+            about: `${data.label} · ${data.mode}`,
+          });
           setForm(BLANK);
           await load();
         } finally {
@@ -74,44 +84,6 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
         Agent credentials. The full token is shown once — store it before you close this page.
       </p>
       {error ? <Notice kind="error">{error}</Notice> : null}
-      {minted ? (
-        <div className="card stack">
-          <Notice kind="warn">
-            This is the only time the token is shown. Copy it now.
-          </Notice>
-          <label>
-            <span>{minted.label} · {minted.mode}</span>
-            <input className="mono" readOnly value={minted.token} />
-          </label>
-          <div className="row">
-            <Button
-              label={copied ? "Copied" : "Copy token"}
-              variant="primary"
-              onClick={() => {
-                // clipboard is undefined outside a secure context: the throw is
-                // synchronous, so it never reaches .catch
-                const clipboard = navigator.clipboard;
-                if (!clipboard) {
-                  setError("clipboard unavailable — select the text and copy");
-                  return;
-                }
-                clipboard
-                  .writeText(minted.token)
-                  .then(() => setCopied(true))
-                  .catch(() => setError("clipboard unavailable — select the text and copy"));
-              }}
-            />
-            <Button
-              label="Done"
-              variant="ghost"
-              onClick={() => {
-                setMinted(null);
-                setCopied(false);
-              }}
-            />
-          </div>
-        </div>
-      ) : null}
       <div className="card stack">
         <h2 className="page-sub" style={{ margin: 0 }}>
           Mint a key
@@ -139,7 +111,7 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
           label="Scopes"
           value={form.scopes}
           onChange={(next) => setForm((prev) => ({ ...prev, scopes: next }))}
-          hint="Space or comma separated patterns, e.g. aliyun stock-* — empty means no access"
+          hint="Space or comma separated patterns, e.g. aliyun stock-* — '*' for everything; empty grants nothing"
         />
         <TextField
           label="Expires (optional)"

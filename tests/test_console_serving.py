@@ -142,3 +142,41 @@ def test_relative_console_dist_resolves(tmp_path, monkeypatch, pg_db: str) -> No
         r = c.get("/")
         assert r.status_code == 200
         assert "cu-test-relative" in r.text
+
+
+def test_html_is_served_as_html(dist, pg_db: str) -> None:
+    """A bookmarked /index.html must render, not download."""
+    with _client(dist, pg_db) as c:
+        r = c.get("/index.html")
+        assert r.headers["content-type"].startswith("text/html")
+
+
+def test_missing_asset_404s_instead_of_serving_the_shell(dist, pg_db: str) -> None:
+    """A stale deploy must surface as 404, not as 200 HTML for a JS import."""
+    with _client(dist, pg_db) as c:
+        r = c.get("/assets/chunk-missing.js")
+        assert r.status_code == 404
+        assert SENTINEL not in r.text
+
+
+def test_shell_headers_are_identical_on_every_url(dist, pg_db: str) -> None:
+    """The shell must not gain or lose hardening headers by entry URL."""
+    with _client(dist, pg_db) as c:
+        seen = []
+        for path in ("/", "/index.html", "/items", "/keys/deep/link"):
+            r = c.get(path)
+            assert r.status_code == 200, path
+            seen.append(
+                (
+                    r.headers.get("content-security-policy"),
+                    r.headers.get("x-content-type-options"),
+                    r.headers.get("referrer-policy"),
+                    r.headers.get("cache-control"),
+                )
+            )
+        assert len(set(seen)) == 1, seen
+        csp, nosniff, referrer, cache = seen[0]
+        assert csp and "frame-ancestors 'none'" in csp
+        assert nosniff == "nosniff"
+        assert referrer == "no-referrer"
+        assert "no-store" in cache

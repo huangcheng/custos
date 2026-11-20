@@ -83,13 +83,15 @@ export async function refreshCsrf(): Promise<string> {
   return csrfToken;
 }
 
-// Endpoints where 401 means "wrong credential", not "missing CSRF": retrying
-// them would replay a bad password and burn another lockout/audit row.
-const NO_CSRF_RETRY = new Set([
+// A 401 is only recoverable when it is a CSRF rejection. The console cannot
+// tell that from the status alone (a wrong password is also 401), so every
+// mutation carries the CSRF header and the retry is restricted to responses
+// that are NOT credential verdicts. `unauthorized` with `x-csrf-token` already
+// present means the token was stale; `step_up_required` means a step-up was
+// missing (retrying replays the same single-use token).
+const CREDENTIAL_ENDPOINTS = new Set([
   "/api/auth/login",
   "/api/auth/setup",
-  "/api/auth/step-up",
-  "/api/auth/password-change",
   "/api/auth/passkeys/assert/options",
   "/api/auth/passkeys/assert/verify",
   "/api/auth/device-exchange",
@@ -102,18 +104,27 @@ export async function api<T>(
   opts: RequestOptions = {},
 ): Promise<T> {
   let res = await raw(method, path, body, opts);
-  if (res.status === 401 && method !== "GET" && !NO_CSRF_RETRY.has(path)) {
-    // Only a CSRF failure is recoverable by re-reading the token. A 401
-    // step_up_required means the request needed a step-up header, and
-    // replaying it with the same single-use token would just fail again.
+  if (res.status === 401 && method !== "GET") {
     const first = await toError(res);
+    // A missing step-up is not a CSRF problem, and retrying it would replay the
+    // same single-use token.
     if (first.code === "step_up_required") throw first;
+    if (CREDENTIAL_ENDPOINTS.has(path)) {
+      // These answer a WRONG PASSWORD with the same 401 `unauthorized` a stale
+      // CSRF token produces, so the request must not be replayed (that would
+      // burn another lockout/audit row). Refresh the token for the NEXT try and
+      // surface the error as-is.
+      await refreshCsrf().catch(() => undefined);
+      throw first;
+    }
     try {
       await refreshCsrf();
     } catch {
       throw first;
     }
-    if (csrfToken) res = await raw(method, path, body, opts);
+    // no token means the session is gone: report the ORIGINAL error
+    if (!csrfToken) throw first;
+    res = await raw(method, path, body, opts);
   }
   if (!res.ok) throw await toError(res);
   if (res.status === 204) return undefined as T;

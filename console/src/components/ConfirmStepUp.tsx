@@ -75,6 +75,9 @@ export function ConfirmStepUp({
       }}
       onKeyDown={(event) => {
         if (event.key !== "Escape") return;
+        // stop here: bubbling would close the parent Drawer too and discard
+        // the operator's unsaved item edits
+        event.stopPropagation();
         cancelled.current = true;
         onCancel();
       }}

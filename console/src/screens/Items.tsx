@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, api } from "../api";
+import { ApiError, api, status } from "../api";
 import { Button, Notice, TextField } from "../components/Field";
 import { ConfirmStepUp } from "../components/ConfirmStepUp";
 import { Drawer } from "../components/Drawer";
@@ -135,6 +135,7 @@ export function Items({ onSignOut }: { onSignOut: () => void }) {
       ) : null}
       {open ? (
         <ItemDrawer
+          key={open}
           existing={open}
           onClose={() => setOpen(null)}
           onSaved={() => {
@@ -168,21 +169,37 @@ function ItemDrawer({
   const [totpRequired, setTotpRequired] = useState(false);
 
   useEffect(() => {
-    void api<{ totp_required: boolean }>("GET", "/api/auth/status")
+    void status()
       .then((st) => setTotpRequired(st.totp_required))
-      .catch(() => undefined);
+      .catch((err: unknown) => {
+        // never silently assume TOTP is off: that would hide the code field
+        setError(err instanceof ApiError ? err.message : "cannot read auth status");
+      });
   }, []);
 
   useEffect(() => {
+    // Reset FIRST: a stale form + the previous item's revision must never be
+    // visible (or saveable) under a different name.
+    setItem(null);
+    setForm(emptyForm());
+    setRevealed({});
+    setHistory(null);
+    setSnapshot(null);
     if (!existing) return;
+    let cancelled = false;
     void api<Item>("GET", `/api/admin/items/${encodeURIComponent(existing)}`)
       .then((data) => {
+        if (cancelled) return;
         setItem(data);
         setForm(formFromItem(data));
       })
-      .catch((err: unknown) =>
-        setError(err instanceof ApiError ? err.message : "cannot load item"),
-      );
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setError(err instanceof ApiError ? err.message : "cannot load item");
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [existing]);
 
   const patch = (index: number, next: Partial<FieldDraft>) => {
@@ -205,7 +222,7 @@ function ItemDrawer({
   const save = async () => {
     // A PUT replaces the whole item: saving an unloaded form would clear the
     // notes and drop every field. Refuse until the live item is in hand.
-    if (existing && !item) {
+    if (existing && (!item || item.name !== existing)) {
       setError("item has not loaded yet");
       return;
     }
@@ -392,7 +409,7 @@ function ItemDrawer({
             label="Save"
             variant="primary"
             onClick={() => void save()}
-            disabled={busy || (Boolean(existing) && !item)}
+            disabled={busy || (Boolean(existing) && (!item || item.name !== existing))}
           />
           {existing ? (
             <>

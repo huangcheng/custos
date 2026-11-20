@@ -32,6 +32,7 @@ export function parseArgs(argv) {
     if (value === undefined || value.startsWith("-")) {
       throw new RequestError("invalid_config", `${flag} needs a value`);
     }
+    // (the value itself is never echoed: it may be a credential)
     return value;
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -49,9 +50,16 @@ export function parseArgs(argv) {
     } else if (arg === "--help" || arg === "-h") {
       args.help = true;
     } else {
-      // an ignored typo (--urll=...) would silently fall back to the env and
-      // talk to a different instance than the operator intended
-      throw new RequestError("invalid_config", `unrecognized argument: ${arg}`);
+      // An ignored typo would silently fall back to the env and talk to a
+      // different instance. Name only the FLAG: `--key=cu-…` must never be
+      // echoed to stderr (it may also carry URL credentials).
+      // Echo the flag only when it IS a flag: a bare positional argument may
+      // be a pasted credential.
+      const flag = arg.startsWith("-") ? arg.split("=")[0] : "<positional argument>";
+      throw new RequestError(
+        "invalid_config",
+        `unrecognized argument: ${flag} (allowed: --url, --key, --help)`,
+      );
     }
   }
   return args;

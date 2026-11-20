@@ -110,8 +110,45 @@ export function createClient({ url, key, fetchImpl = fetch, timeoutMs = DEFAULT_
         data: wantsText ? { text: "" } : {},
       };
     }
-    const wantsText = (accept ?? "").startsWith("text/");
-    if (wantsText) return { ok: true, status: res.status, data: { text } };
+    // The ok-check comes FIRST, before any media-type branch: a text/plain
+    // error page must not reach the agent as a successful result. Custos still
+    // renders AppError as JSON for a text/* request, so try the envelope.
+    if (!res.ok && (accept ?? "").startsWith("text/")) {
+      try {
+        const envelope = JSON.parse(text);
+        if (envelope && typeof envelope === "object" && typeof envelope.code === "string") {
+          throw new RequestError(
+            envelope.code,
+            typeof envelope.message === "string"
+              ? envelope.message
+              : `request failed with status ${res.status}`,
+          );
+        }
+      } catch (err) {
+        if (err instanceof RequestError) throw err;
+        // not JSON (a proxy's HTML error page): report the status only
+      }
+      throw new RequestError("error", `request failed with status ${res.status}`);
+    }
+    if (!res.ok) {
+      let data;
+      let parsed = true;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        parsed = false;
+      }
+      const isObject = parsed && data !== null && typeof data === "object";
+      const code = isObject && typeof data.code === "string" ? data.code : "error";
+      const message =
+        isObject && typeof data.message === "string"
+          ? data.message
+          : `request failed with status ${res.status}`;
+      throw new RequestError(code, message);
+    }
+    if ((accept ?? "").startsWith("text/")) {
+      return { ok: true, status: res.status, data: { text } };
+    }
     let data;
     let parsed = true;
     try {
@@ -120,15 +157,6 @@ export function createClient({ url, key, fetchImpl = fetch, timeoutMs = DEFAULT_
       parsed = false;
     }
     const isObject = parsed && data !== null && typeof data === "object";
-    if (!res.ok) {
-      // Only the server's own code/message reaches the client: no body echo.
-      const code = isObject && typeof data.code === "string" ? data.code : "error";
-      const message =
-        isObject && typeof data.message === "string"
-          ? data.message
-          : `request failed with status ${res.status}`;
-      throw new RequestError(code, message);
-    }
     if (!isObject) {
       // a JSON endpoint answering with a scalar or non-JSON is a broken
       // deployment: report it instead of handing raw bytes back as success
