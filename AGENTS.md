@@ -56,30 +56,22 @@ contains only the rule, not the gate machinery.
 English commit messages: imperative subject, body explains why, plus the paths
 that prove verification. One logical change per commit.
 
-## Spec audit gate (multi-model consensus)
+## Spec audit gate (waived by operator decision)
 
-Every spec under `docs/superpowers/specs/` must pass a flash-model audit before
-it is considered approved. The gate runner is **machine-local and uncommitted**
-(`scripts/spec-audit.sh`, gitignored — keep it out of the repo history):
+**2026-11-23: the operator waived the pi multi-model spec-audit flow ("skip pi
+review flow, just keep ocr for code review").** Specs no longer require a
+flash-model consensus round before approval; `ocr review --audience agent`
+(above) is the sole mechanical gate. The rev-37 design revision ran four audit
+rounds before the waiver; every finding from those rounds is resolved in the
+spec and code.
 
-    scripts/spec-audit.sh docs/superpowers/specs/<spec>.md
-
-- The script runs `pi -p --no-session --no-tools --model <m>` for each reviewer
-  model in a **local, uncommitted roster** (`scripts/spec-audit.models.local`,
-  gitignored; `SPEC_AUDIT_MODELS` env overrides). The committed script and docs
-  reference only the roster file — never provider names, model ids, or
-  endpoints. Reviewer models should be fast/cheap (flash-class) picks.
-- Each model reviews the spec for contradictions, undefined behavior, security
-  holes, and untestable claims, and must end with a verdict line
-  `VERDICT: APPROVE` or `VERDICT: REVISE` plus numbered findings.
-- Fix the findings in the spec, rerun the whole roster, repeat until **every**
-  model approves in the same round. Cap at 5 rounds; if models still disagree,
-  stop and bring the remaining objections to the operator — never silently
-  drop a dissenting model from the roster.
-- Audit transcripts and other review intermediates never stay in the repo.
-  Save them under `/tmp/custos-audits/<spec-stem>/` (round-N per model); the
-  commit references the audit run (date, rounds, unanimous verdict), not the
-  transcripts.
+If the flow is re-enabled, the runner stays **machine-local and uncommitted**
+(`scripts/spec-audit.sh`, gitignored) with a local uncommitted roster
+(`scripts/spec-audit.models.local`; `SPEC_AUDIT_MODELS` env overrides): each
+reviewer ends with `VERDICT: APPROVE`/`REVISE` plus numbered findings; fix and
+rerun the whole roster until unanimous (cap 5 rounds; bring unresolved
+objections to the operator — never silently drop a dissenting model).
+Transcripts live under `/tmp/custos-audits/<spec-stem>/`, never in the repo.
 
 ## Verification
 

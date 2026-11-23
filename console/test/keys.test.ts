@@ -3,10 +3,41 @@ import test from "node:test";
 import {
   KeyFormError,
   auditQuery,
+  credentialAbout,
+  expiryLabel,
   mintKeyBody,
+  revealBlocker,
   scopeSummary,
   tokenExpiryBody,
 } from "../src/keys.ts";
+
+test("revealBlocker refuses legacy and expired rows, allows live ones", () => {
+  const future = new Date(Date.now() + 86400_000).toISOString();
+  const past = new Date(Date.now() - 86400_000).toISOString();
+  assert.equal(revealBlocker({ has_secret: true, expires_at: future }), undefined);
+  assert.equal(revealBlocker({ has_secret: true, expires_at: null }), undefined);
+  assert.match(revealBlocker({ has_secret: false, expires_at: future }) ?? "", /not recoverable/);
+  assert.match(revealBlocker({ has_secret: true, expires_at: past }) ?? "", /expired/);
+  // legacy wins over expired (both refuse; the reason is the storage gap)
+  assert.match(revealBlocker({ has_secret: false, expires_at: past }) ?? "", /not recoverable/);
+});
+
+test("expiryLabel keeps revoked/expired/date/never distinct", () => {
+  const future = new Date(Date.now() + 86400_000).toISOString();
+  const past = new Date(Date.now() - 86400_000).toISOString();
+  assert.equal(expiryLabel({ revoked_at: "2026-01-01T00:00:00Z", expires_at: future }), "revoked");
+  assert.equal(expiryLabel({ expires_at: past }), "expired");
+  assert.equal(expiryLabel({ expires_at: future }), future.slice(0, 10));
+  assert.equal(expiryLabel({ expires_at: null }), "never");
+});
+
+test("credentialAbout is one formatter for mint and reveal queue identity", () => {
+  assert.equal(
+    credentialAbout({ label: "l", mode: "read", key_id: "abcdef012345" }),
+    "l · read · abcdef012345",
+  );
+  assert.equal(credentialAbout({ label: "l", key_id: "abcdef012345" }), "l · abcdef012345");
+});
 
 test("mintKeyBody splits scopes and omits blank expiry", () => {
   const body = mintKeyBody({

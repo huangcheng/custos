@@ -10,7 +10,14 @@ import pytest
 from sqlalchemy import delete, select, update
 
 from custos.crypto import Vault, parse_keyring
-from custos.db.models import Field, FieldHistory, Item, OperatorAccount, StepUpToken
+from custos.db.models import (
+    Field,
+    FieldHistory,
+    Item,
+    OperatorAccount,
+    OperatorSession,
+    StepUpToken,
+)
 from custos.errors import AppError
 from custos.rekey import mint_scan_cursor, read_scan_cursor
 from tests.admin_conftest import admin_stack, bearer
@@ -226,6 +233,40 @@ async def test_one_active_run(admin_stack) -> None:
         r = await client.post("/api/admin/rekey",
                               headers={**hdr, "x-step-up-token": su2}, json={})
         assert r.status_code == 409 and r.json()["code"] == "conflict"
+
+
+async def test_dead_session_run_does_not_block(admin_stack) -> None:
+    async with admin_stack(keyring=RING2) as (client, maker, h):
+        # >400 old rows: both first batches leave work behind, so the new
+        # run row survives (a finished sweep releases its run)
+        await _seed_old(maker, 450)
+        csrf = await h["login"](client)
+        hdr = {"x-csrf-token": csrf}
+        su = await h["step_up"](client, csrf)
+        r = await client.post("/api/admin/rekey",
+                              headers={**hdr, "x-step-up-token": su}, json={})
+        assert r.status_code == 200
+        # absolute-expire every existing session (death, not revocation)
+        async with maker() as s:
+            await s.execute(
+                update(OperatorSession).values(
+                    absolute_expires_at=datetime.now(UTC) - timedelta(seconds=1)
+                )
+            )
+            await s.commit()
+        # fresh login + step-up: the dead session's run row must not 409
+        csrf2 = await h["login"](client)
+        su2 = await h["step_up"](client, csrf2)
+        r = await client.post(
+            "/api/admin/rekey",
+            headers={"x-csrf-token": csrf2, "x-step-up-token": su2}, json={},
+        )
+        assert r.status_code == 200, r.text
+        async with maker() as s:
+            runs = (await s.execute(
+                select(StepUpToken).where(StepUpToken.kind == "rekey_run")
+            )).scalars().all()
+            assert len(runs) == 1
 
 
 async def test_cursor_binding(admin_stack) -> None:

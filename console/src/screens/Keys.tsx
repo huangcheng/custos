@@ -3,7 +3,15 @@ import { ApiError, api, status } from "../api";
 import { useOneTime } from "../onetime";
 import { Button, Notice, TextField } from "../components/Field";
 import { ConfirmStepUp } from "../components/ConfirmStepUp";
-import { KeyFormError, mintKeyBody, scopeSummary, type KeyForm } from "../keys";
+import {
+  KeyFormError,
+  credentialAbout,
+  expiryLabel,
+  mintKeyBody,
+  revealBlocker,
+  scopeSummary,
+  type KeyForm,
+} from "../keys";
 import { truncate } from "../plain";
 import type { KeyRow, MintedKey } from "../types";
 
@@ -53,11 +61,13 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
           const data = await api<MintedKey>("POST", "/api/admin/keys", body, {
             stepUpToken: token,
           });
-          // store it above the screens: a sidebar click must not destroy it
+          // store it above the screens: a sidebar click must not destroy it;
+          // key_id in `about` keeps distinct mints from colliding in the queue
           oneTime.show({
             kind: "agent-key",
             value: data.token,
-            about: `${data.label} · ${data.mode}`,
+            about: credentialAbout(data),
+            retrievable: true,
           });
           setForm(BLANK);
           await load();
@@ -77,11 +87,32 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
     });
   };
 
+  const reveal = (row: KeyRow) => {
+    setError("");
+    setPending(() => async (token: string) => {
+      setBusy(true);
+      try {
+        const data = await api<{ token: string }>(
+          "GET", `/api/admin/keys/${row.key_id}/reveal`, undefined, { stepUpToken: token },
+        );
+        oneTime.show({
+          kind: "agent-key",
+          value: data.token,
+          about: credentialAbout(row),
+          retrievable: true,
+        });
+      } finally {
+        setBusy(false);
+      }
+    });
+  };
+
   return (
     <>
       <h1 className="page-title">Keys</h1>
       <p className="page-sub">
-        Agent credentials. The full token is shown once — store it before you close this page.
+        Agent credentials. The full token is shown at mint and can be re-revealed later with a
+        step-up.
       </p>
       {error ? <Notice kind="error">{error}</Notice> : null}
       <div className="card stack">
@@ -139,7 +170,9 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => (
+              {rows.map((row) => {
+                const blocker = revealBlocker(row);
+                return (
                 <tr key={row.key_id}>
                   <td title={row.label}>{truncate(row.label, 28)}</td>
                   <td className="mono">{row.key_id}</td>
@@ -149,21 +182,32 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
                     </span>
                   </td>
                   <td className="mono">{scopeSummary(row)}</td>
-                  <td className="mono muted">
-                    {row.revoked_at ? "revoked" : (row.expires_at?.slice(0, 10) ?? "never")}
+                  <td className="mono muted" title={row.expires_at ?? undefined}>
+                    {expiryLabel(row)}
                   </td>
                   <td>
                     {row.revoked_at ? null : (
-                      <Button
-                        label="Revoke"
-                        variant="danger"
-                        onClick={() => revoke(row.key_id)}
-                        disabled={busy}
-                      />
+                      <>
+                        {/* the span carries the tooltip: disabled buttons get no pointer events */}
+                        <span title={blocker}>
+                          <Button
+                            label="Reveal"
+                            onClick={() => reveal(row)}
+                            disabled={busy || blocker !== undefined}
+                          />
+                        </span>{" "}
+                        <Button
+                          label="Revoke"
+                          variant="danger"
+                          onClick={() => revoke(row.key_id)}
+                          disabled={busy}
+                        />
+                      </>
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         )}

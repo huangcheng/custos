@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from custos.crypto import UnreadableError, Vault
 from custos.db.models import (
+    AgentKey,
     Field,
     FieldHistory,
     OperatorAccount,
@@ -38,8 +39,21 @@ from custos.errors import AppError
 
 _BATCH = 200
 _RUN_TTL = timedelta(minutes=30)
-_TABLES = ("fields", "field_history", "operator_account")
+_TABLES = ("fields", "field_history", "operator_account", "agent_keys", "operator_tokens")
 _RUN_LOCK_KEY = 8148  # xact advisory lock: one active rekey run per vault
+_MODELS: dict[str, Any] = {
+    "fields": Field, "field_history": FieldHistory,
+    "operator_account": OperatorAccount,
+    "agent_keys": AgentKey, "operator_tokens": OperatorToken,
+}
+
+
+def _version_col(table: str) -> Any:
+    if table == "operator_account":
+        return OperatorAccount.totp_key_version
+    if table in ("agent_keys", "operator_tokens"):
+        return _MODELS[table].secret_key_version
+    return _MODELS[table].key_version
 
 
 def _b64url(raw: bytes) -> str:
@@ -102,14 +116,24 @@ async def mint_run(
     # serialize the check-then-insert: two concurrent first batches must not
     # both mint a run (READ COMMITTED alone does not prevent it)
     await session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _RUN_LOCK_KEY})
-    live = (
+    # A dead session's run row must not block a fresh login's run: ignore
+    # (and delete) unexpired run rows whose bound session is expired/revoked.
+    candidates = (
         await session.execute(
-            select(StepUpToken.id).where(
-                StepUpToken.kind == "rekey_run", StepUpToken.expires_at > now
-            )
+            select(StepUpToken, OperatorSession)
+            .outerjoin(OperatorSession, OperatorSession.id == StepUpToken.session_id)
+            .where(StepUpToken.kind == "rekey_run", StepUpToken.expires_at > now)
         )
-    ).first()
-    if live is not None:
+    ).all()
+    live_run = False
+    from custos.operator.sessions import session_is_live
+
+    for run, sess in candidates:
+        if sess is not None and session_is_live(sess, now):
+            live_run = True
+        else:
+            await session.delete(run)
+    if live_run:
         raise AppError("conflict", "a rekey run is already active")
     await consume_step_up(session, single_token, presenter)
     raw = _b64url(secrets.token_bytes(32))
@@ -177,12 +201,8 @@ async def _select_rows(
     newest = vault.current_version
     for idx in range(start_idx, len(_TABLES)):
         table = _TABLES[idx]
-        model: Any = {"fields": Field, "field_history": FieldHistory,
-                      "operator_account": OperatorAccount}[table]
-        version_col = (
-            OperatorAccount.totp_key_version if table == "operator_account"
-            else model.key_version
-        )
+        model: Any = _MODELS[table]
+        version_col = _version_col(table)
         stmt = select(model)
         if all_rows:
             stmt = stmt.where(version_col.is_not(None))
@@ -206,6 +226,10 @@ def _row_blob(table: str, row: Any) -> tuple[bytes | None, int | None, str, str]
     """(ciphertext, version, crypto domain, row_id text)."""
     if table == "operator_account":
         return row.totp_secret, row.totp_key_version, "operator:totp", ""
+    if table == "agent_keys":
+        return row.secret_ciphertext, row.secret_key_version, "key", row.key_id
+    if table == "operator_tokens":
+        return row.secret_ciphertext, row.secret_key_version, "token", row.key_id
     domain = "field" if table == "fields" else "fieldh"
     return row.ciphertext, row.key_version, domain, str(row.id)
 
@@ -219,12 +243,8 @@ async def _count_ahead(
     start_idx = _table_index(table)
     for idx in range(start_idx, len(_TABLES)):
         t = _TABLES[idx]
-        model: Any = {"fields": Field, "field_history": FieldHistory,
-                      "operator_account": OperatorAccount}[t]
-        version_col = (
-            OperatorAccount.totp_key_version if t == "operator_account"
-            else model.key_version
-        )
+        model: Any = _MODELS[t]
+        version_col = _version_col(t)
         stmt = select(func.count()).select_from(model)
         if all_rows:
             stmt = stmt.where(version_col.is_not(None))
@@ -247,7 +267,8 @@ async def _sweep_batch(
     rows via guarded UPDATE, verify only counts. Returns counts + cursor."""
     selected = await _select_rows(session, vault, cursor_payload, all_rows=not reseal)
     skipped = 0
-    unreadable = {"fields": 0, "field_history": 0, "operator_account": 0}
+    unreadable = {"fields": 0, "field_history": 0, "operator_account": 0,
+                  "agent_keys": 0, "operator_tokens": 0}
     last_table: str | None = cursor_payload.get("table")
     last_id: Any = cursor_payload.get("last_id")
     newest = vault.current_version
@@ -276,6 +297,14 @@ async def _sweep_batch(
                     OperatorAccount.totp_secret == blob,
                 )
                 .values(totp_secret=new_blob, totp_key_version=new_version)
+            )
+        elif table in ("agent_keys", "operator_tokens"):
+            model = _MODELS[table]
+            result = await session.execute(
+                update(model)
+                .where(model.id == row.id, model.secret_key_version == version,
+                       model.secret_ciphertext == blob)
+                .values(secret_ciphertext=new_blob, secret_key_version=new_version)
             )
         else:
             model = Field if table == "fields" else FieldHistory
@@ -313,6 +342,8 @@ async def _sweep_batch(
             "fields": unreadable["fields"],
             "history": unreadable["field_history"],
             "operator": unreadable["operator_account"],
+            "agent_keys": unreadable["agent_keys"],
+            "operator_tokens": unreadable["operator_tokens"],
         }
     if cursor is not None and remaining > 0:
         out["_cursor_payload"] = cursor
@@ -337,7 +368,10 @@ async def rekey_audit(session: AsyncSession, vault: Vault) -> dict[str, Any]:
     decryption: corruption under an available version is verify's job."""
     from custos.db.models import Item
 
-    versions: dict[str, dict[str, int]] = {"fields": {}, "history": {}, "operator": {}}
+    versions: dict[str, dict[str, int]] = {
+        "fields": {}, "history": {}, "operator": {},
+        "agent_keys": {}, "operator_tokens": {},
+    }
     affected: dict[str, list[str]] = {}
     newest = vault.current_version
     for table, key in (("fields", "fields"), ("field_history", "history")):
@@ -374,4 +408,14 @@ async def rekey_audit(session: AsyncSession, vault: Vault) -> dict[str, Any]:
         )
     ).all()
     versions["operator"] = {str(v): int(n) for v, n in op_rows}
+    for table, key in (("agent_keys", "agent_keys"), ("operator_tokens", "operator_tokens")):
+        model = _MODELS[table]
+        rows = (
+            await session.execute(
+                select(model.secret_key_version, func.count())
+                .where(model.secret_key_version.is_not(None))
+                .group_by(model.secret_key_version)
+            )
+        ).all()
+        versions[key] = {str(v): int(n) for v, n in rows}
     return {"versions": versions, "affected": affected, "newest": newest}

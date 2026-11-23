@@ -21,7 +21,9 @@ if [ -z "${CUSTOS_BROWSER_CMD:-}" ] && [ "${E2E_ALLOW_SKIP:-0}" != "1" ]; then
 fi
 
 LOG_DIR="/tmp/custos-e2e"
-mkdir -p "$LOG_DIR"
+# refuse a squatted log root (shared guard; see scripts/e2e_common.sh)
+. scripts/e2e_common.sh
+harden_log_dir "$LOG_DIR"
 RUN_DIR="$(mktemp -d "$LOG_DIR/console-XXXXXX")"
 PROJECT="custos-e2e-console-$$"
 export E2E_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
@@ -45,11 +47,11 @@ fail() { E2E_FAILED=1; echo "E2E FAIL: $1 (artifacts: $RUN_DIR)" >&2; exit 1; }
 trap 'E2E_FAILED=1' ERR
 
 echo "== generate throwaway secrets"
+make_secrets_dir "$RUN_DIR"
 python3 - "$RUN_DIR" <<'PYEOF'
 import base64, os, secrets, subprocess, sys
 run = sys.argv[1]
 b64url = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
-os.makedirs(f"{run}/secrets", exist_ok=True)
 pw = b64url(secrets.token_bytes(18))
 with open(f"{run}/secrets/keyring", "w") as f: f.write(f"k1:{b64url(secrets.token_bytes(32))}\n")
 with open(f"{run}/secrets/pepper", "w") as f: f.write(b64url(secrets.token_bytes(32)) + "\n")
@@ -442,7 +444,8 @@ ok(
   "the one-time panel is rendered",
 );
 
-// 7b. the token really is one-time: it is not retrievable again after a reload
+// 7b. the inventory never carries the secret (the token IS re-revealable via
+// the Reveal button — rev 37 — but never embedded in list/UI state)
 await page.goto(`${BASE}/keys`);
 await until(
   () => page.evaluate(() => document.body.textContent.includes("Mint a key")),
@@ -464,8 +467,57 @@ await until(
 );
 ok(
   !(await leaked(MINTED_KEY.split(".")[1])),
-  "the token is not re-readable after a reload (text, inputs, attributes)",
+  "the inventory/UI never embeds the secret after a reload (text, inputs, attributes)",
 );
+
+// 7c. re-reveal: the row's Reveal button + step-up returns the SAME token
+await page.evaluate(() => {
+  const row = [...document.querySelectorAll("tr")].find((r) =>
+    r.textContent.includes("cu-test-console-key"));
+  if (!row) throw new Error("minted key row not found");
+  const btn = [...row.querySelectorAll("button")].find((b) => /Reveal/i.test(b.textContent));
+  if (!btn || btn.disabled) throw new Error("Reveal button missing or disabled");
+  btn.click();
+});
+await until(() => page.evaluate(() => !!document.querySelector(".scrim form")), "the reveal step-up prompt");
+await page.evaluate(({ pw }) => {
+  const prompt = document.querySelector(".scrim form");
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype, "value").set;
+  const pwInput = prompt.querySelector('input[type="password"]');
+  setter.call(pwInput, pw);
+  pwInput.dispatchEvent(new Event("input", { bubbles: true }));
+  [...prompt.querySelectorAll("button")].find((b) => /Continue/i.test(b.textContent)).click();
+}, { pw: PW });
+await until(
+  () => page.evaluate(({ key }) => {
+    const panel = document.querySelector('[data-testid="one-time-panel"]');
+    if (!panel) return false;
+    return [...panel.querySelectorAll("input")].some((i) => i.value === key);
+  }, { key: MINTED_KEY }),
+  "the re-revealed token panel",
+);
+ok(true, "Reveal + step-up returns the exact minted token");
+ok(
+  await page.evaluate(() => {
+    const text = document.querySelector('[data-testid="one-time-panel"]').textContent ?? "";
+    return text.includes("re-reveal") && !text.includes("shown once");
+  }),
+  "the re-revealed panel uses the retrievable copy, not the shown-once copy",
+);
+ok(
+  await page.evaluate(async () => {
+    const res = await fetch("/api/admin/audit?action=key.reveal", { credentials: "same-origin" });
+    if (res.status !== 200) return false;
+    const body = await res.json();
+    return body.items.some((x) => x.ok);
+  }),
+  "the console reveal left a key.reveal audit row",
+);
+await page.evaluate(() => {
+  const panel = document.querySelector('[data-testid="one-time-panel"]');
+  [...panel.querySelectorAll("button")].find((b) => /I have stored it/i.test(b.textContent)).click();
+});
 
 // 8. that mint is in the audit trail
 await page.goto(`${BASE}/audit`);

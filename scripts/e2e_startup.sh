@@ -41,19 +41,11 @@ PASSED=0
 CASES=0
 
 echo "== base secrets"
+make_secrets_dir "$RUN_DIR"
 python3 - "$RUN_DIR" "$DB_PASSWORD" <<'PYEOF'
 import base64, os, subprocess, sys
 run, pw = sys.argv[1], sys.argv[2]
-if os.path.islink(run) or os.path.realpath(run) != os.path.join(
-        os.path.realpath(os.path.dirname(run)), os.path.basename(run)):
-    sys.exit("refusing symlinked run dir")
 b64url = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
-os.makedirs(f"{run}/secrets", exist_ok=True)
-if os.path.islink(f"{run}/secrets") or os.path.realpath(f"{run}/secrets") != os.path.join(
-        os.path.realpath(run), "secrets"):
-    sys.exit("refusing symlinked secrets dir")
-if os.stat(f"{run}/secrets").st_uid != os.getuid():
-    sys.exit("secrets dir is not owned by the running user")
 
 def write(name, body):
     with open(f"{run}/secrets/{name}", "w") as f:

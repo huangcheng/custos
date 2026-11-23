@@ -18,6 +18,8 @@ export type OneTime = {
   value: string | string[];
   /** what it belongs to (label, key id) */
   about: string;
+  /** true for re-revealed credentials: the panel copy must not claim "shown once" */
+  retrievable?: boolean;
 };
 
 // A QUEUE, not a slot: minting a second secret must never destroy the first

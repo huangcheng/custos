@@ -24,6 +24,8 @@ pub enum KeyCommand {
     Ls,
     /// Revoke a key (session + step-up).
     Revoke { key_id: String },
+    /// Re-reveal a minted key's full token (session + step-up).
+    Reveal { key_id: String },
 }
 
 pub async fn run(client: &Client, cmd: KeyCommand, as_json: bool) -> Result<(), CliError> {
@@ -47,14 +49,16 @@ pub async fn run(client: &Client, cmd: KeyCommand, as_json: bool) -> Result<(), 
                     Some(&token),
                 )
                 .await?;
-            // The token is shown exactly once: print it, and only it, on stdout.
+            // Print the token, and only it, on stdout; it stays re-revealable
+            // through `custos key reveal` (sensitive-gated, audited).
             match out.get("token").and_then(Value::as_str) {
                 Some(token) => {
                     if as_json {
                         println!("{}", serde_json::to_string_pretty(&out)?);
                     } else {
                         println!("{token}");
-                        eprintln!("(this is the only time the token is shown)");
+                        let kid = out.get("key_id").and_then(|v| v.as_str()).unwrap_or("<key_id>");
+                        eprintln!("(key_id {kid}; re-reveal later with `custos key reveal {kid}`)");
                     }
                 }
                 None => return Err(CliError::Config("server returned no token".into())),
@@ -93,6 +97,26 @@ pub async fn run(client: &Client, cmd: KeyCommand, as_json: bool) -> Result<(), 
                 )
                 .await?;
             println!("revoked {key_id}");
+        }
+        KeyCommand::Reveal { key_id } => {
+            let token = prompt_step_up(client).await?;
+            let out = client
+                .get_step_up(
+                    RouteClass::SessionOnly,
+                    &format!("/api/admin/keys/{}/reveal", Client::seg(&key_id)),
+                    &token,
+                )
+                .await?;
+            match out.get("token").and_then(Value::as_str) {
+                Some(secret) => {
+                    if as_json {
+                        println!("{}", serde_json::to_string_pretty(&out)?);
+                    } else {
+                        println!("{secret}");
+                    }
+                }
+                None => return Err(CliError::Config("server returned no token".into())),
+            }
         }
     }
     Ok(())

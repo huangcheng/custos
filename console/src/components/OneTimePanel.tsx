@@ -38,12 +38,12 @@ export function OneTimePanel({
     );
   };
 
-  const titles: Record<OneTime["kind"], string> = {
-    "agent-key": "New agent key",
-    "operator-token": "New operator token",
-    "recovery-codes": "New recovery codes",
-    "totp-secret": "Authenticator secret",
-    "device-transfer": "CLI transfer code",
+  const titles: Record<OneTime["kind"], { mint: string; revealed: string }> = {
+    "agent-key": { mint: "New agent key", revealed: "Agent key" },
+    "operator-token": { mint: "New operator token", revealed: "Operator token" },
+    "recovery-codes": { mint: "New recovery codes", revealed: "Recovery codes" },
+    "totp-secret": { mint: "Authenticator secret", revealed: "Authenticator secret" },
+    "device-transfer": { mint: "CLI transfer code", revealed: "CLI transfer code" },
   };
 
   return (
@@ -53,8 +53,11 @@ export function OneTimePanel({
       data-testid="one-time-panel"
     >
       <Notice kind="warn">
-        {titles[oneTime.kind]} for <span className="mono">{oneTime.about}</span> — shown
-        once. Copy it now; it is not retrievable after you dismiss this panel.
+        {titles[oneTime.kind][oneTime.retrievable ? "revealed" : "mint"]} for{" "}
+        <span className="mono">{oneTime.about}</span>{" "}
+        {oneTime.retrievable
+          ? "— copy it now; you can re-reveal it later with a step-up."
+          : "— shown once. Copy it now; it is not retrievable after you dismiss this panel."}
       </Notice>
       {error ? <Notice kind="error">{error}</Notice> : null}
       {values.length === 1 ? (

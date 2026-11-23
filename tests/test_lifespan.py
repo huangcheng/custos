@@ -29,9 +29,16 @@ async def test_skip_migrate_rejects_stale_schema(pg_db: str) -> None:
             async with app.router.lifespan_context(app):
                 pass
     finally:
+        # restore the CURRENT head (not a hardcoded revision) so later
+        # SKIP_MIGRATE tests see a valid schema regardless of migration count
+        from custos.app import _head_revisions
+
+        head = next(iter(_head_revisions()))
         engine = create_async_engine(pg_db)
         async with engine.begin() as conn:
-            await conn.execute(text("UPDATE alembic_version SET version_num = '0001'"))
+            await conn.execute(
+                text("UPDATE alembic_version SET version_num = :v"), {"v": head}
+            )
         await engine.dispose()
 
 

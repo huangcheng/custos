@@ -52,11 +52,12 @@ async def _assert_key_versions(engine: AsyncEngine, settings: Settings) -> None:
     referenced: set[int] = set()
     from sqlalchemy import select
 
-    from custos.db.models import Field, FieldHistory, OperatorAccount
+    from custos.db.models import AgentKey, Field, FieldHistory, OperatorAccount, OperatorToken
 
     async with engine.connect() as conn:
         for column in (Field.key_version, FieldHistory.key_version,
-                       OperatorAccount.totp_key_version):
+                       OperatorAccount.totp_key_version,
+                       AgentKey.secret_key_version, OperatorToken.secret_key_version):
             rows = await conn.execute(
                 select(column).distinct().where(column.is_not(None))
             )

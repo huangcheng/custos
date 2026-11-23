@@ -3,7 +3,7 @@ import { ApiError, api } from "../api";
 import { useOneTime } from "../onetime";
 import { Button, Notice, TextField } from "../components/Field";
 import { ConfirmStepUp } from "../components/ConfirmStepUp";
-import { KeyFormError, tokenExpiryBody } from "../keys";
+import { KeyFormError, credentialAbout, expiryLabel, revealBlocker, tokenExpiryBody } from "../keys";
 import { truncate } from "../plain";
 import type {
   AuthStatus,
@@ -333,6 +333,7 @@ function Tokens({ totpRequired }: { totpRequired: boolean }) {
   const [expiresAt, setExpiresAt] = useState("");
   const [allowSensitive, setAllowSensitive] = useState(false);
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<null | ((token: string) => Promise<void>)>(null);
 
   const load = useCallback(async () => {
@@ -388,7 +389,8 @@ function Tokens({ totpRequired }: { totpRequired: boolean }) {
                   oneTime.show({
                     kind: "operator-token",
                     value: data.token,
-                    about: data.label,
+                    about: credentialAbout(data),
+                    retrievable: true,
                   });
                   setLabel("");
                   setExpiresAt("");
@@ -417,7 +419,9 @@ function Tokens({ totpRequired }: { totpRequired: boolean }) {
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => (
+              {rows.map((row) => {
+                const blocker = revealBlocker(row);
+                return (
                 <tr key={row.key_id}>
                   <td title={row.label}>{truncate(row.label, 28)}</td>
                   <td className="mono">{row.key_id}</td>
@@ -426,27 +430,58 @@ function Tokens({ totpRequired }: { totpRequired: boolean }) {
                       {row.allow_sensitive ? "yes" : "no"}
                     </span>
                   </td>
-                  <td className="mono muted">
-                    {row.revoked_at ? "revoked" : row.expires_at.slice(0, 10)}
+                  <td className="mono muted" title={row.expires_at}>
+                    {expiryLabel(row)}
                   </td>
                   <td>
                     {row.revoked_at ? null : (
-                      <Button
-                        label="Revoke"
-                        variant="danger"
-                        onClick={() =>
-                          setPending(() => async (token: string) => {
-                            await api("DELETE", `/api/admin/tokens/${row.key_id}`, undefined, {
-                              stepUpToken: token,
-                            });
-                            await load();
-                          })
-                        }
-                      />
+                      <>
+                        {/* the span carries the tooltip: disabled buttons get no pointer events */}
+                        <span title={blocker}>
+                          <Button
+                            label="Reveal"
+                            disabled={busy || blocker !== undefined}
+                            onClick={() => {
+                              setError("");
+                              setPending(() => async (token: string) => {
+                                setBusy(true);
+                                try {
+                                  const data = await api<{ token: string }>(
+                                    "GET", `/api/admin/tokens/${row.key_id}/reveal`, undefined,
+                                    { stepUpToken: token },
+                                  );
+                                  oneTime.show({
+                                    kind: "operator-token",
+                                    value: data.token,
+                                    about: credentialAbout(row),
+                                    retrievable: true,
+                                  });
+                                } finally {
+                                  setBusy(false);
+                                }
+                              });
+                            }}
+                          />
+                        </span>{" "}
+                        <Button
+                          label="Revoke"
+                          variant="danger"
+                          disabled={busy}
+                          onClick={() =>
+                            setPending(() => async (token: string) => {
+                              await api("DELETE", `/api/admin/tokens/${row.key_id}`, undefined, {
+                                stepUpToken: token,
+                              });
+                              await load();
+                            })
+                          }
+                        />
+                      </>
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -593,7 +628,9 @@ function Maintenance({ totpRequired }: { totpRequired: boolean }) {
                 // verify is a paged sweep: one call checks only `limit` rows
                 let runToken: string | undefined = token;
                 let cursor: string | undefined;
-                let totals = { fields: 0, history: 0, operator: 0 };
+                let totals: VerifyResult["unreadable"] = {
+                  fields: 0, history: 0, operator: 0, agent_keys: 0, operator_tokens: 0,
+                };
                 for (let i = 0; i < 500; i += 1) {
                   const body: Record<string, unknown> = {};
                   if (cursor) body.cursor = cursor;
@@ -607,6 +644,8 @@ function Maintenance({ totpRequired }: { totpRequired: boolean }) {
                     fields: totals.fields + data.unreadable.fields,
                     history: totals.history + data.unreadable.history,
                     operator: totals.operator + data.unreadable.operator,
+                    agent_keys: totals.agent_keys + data.unreadable.agent_keys,
+                    operator_tokens: totals.operator_tokens + data.unreadable.operator_tokens,
                   };
                   if (data.run_token) runToken = data.run_token;
                   if (data.remaining === 0) {
@@ -631,13 +670,19 @@ function Maintenance({ totpRequired }: { totpRequired: boolean }) {
         {verify ? (
           <Notice
             kind={
-              verify.unreadable.fields + verify.unreadable.history + verify.unreadable.operator > 0
+              verify.unreadable.fields +
+                verify.unreadable.history +
+                verify.unreadable.operator +
+                verify.unreadable.agent_keys +
+                verify.unreadable.operator_tokens >
+              0
                 ? "warn"
                 : "ok"
             }
           >
             Verify: fields {verify.unreadable.fields}, history {verify.unreadable.history},
-            operator {verify.unreadable.operator} unreadable.
+            operator {verify.unreadable.operator}, agent keys {verify.unreadable.agent_keys},
+            operator tokens {verify.unreadable.operator_tokens} unreadable.
           </Notice>
         ) : null}
       </div>

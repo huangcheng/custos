@@ -28,3 +28,21 @@ harden_log_dir() {
     fi
   fi
 }
+
+# Create + validate the per-run secrets dir (symlink/ownership policy shared
+# by every harness; the run dir itself was already hardened above).
+make_secrets_dir() {
+  python3 - "$1" <<'PYEOF'
+import os, sys
+run = sys.argv[1]
+if os.path.islink(run) or os.path.realpath(run) != os.path.join(
+        os.path.realpath(os.path.dirname(run)), os.path.basename(run)):
+    sys.exit("refusing symlinked run dir")
+os.makedirs(f"{run}/secrets", exist_ok=True)
+if os.path.islink(f"{run}/secrets") or os.path.realpath(f"{run}/secrets") != os.path.join(
+        os.path.realpath(run), "secrets"):
+    sys.exit("refusing symlinked secrets dir")
+if os.stat(f"{run}/secrets").st_uid != os.getuid():
+    sys.exit("secrets dir is not owned by the running user")
+PYEOF
+}

@@ -115,11 +115,20 @@ class AgentKey(Base):
     __tablename__ = "agent_keys"
     __table_args__ = (
         CheckConstraint("mode IN ('read', 'read-write')", name="ck_agent_keys_mode"),
+        CheckConstraint(
+            "(secret_ciphertext IS NULL) = (secret_key_version IS NULL)",
+            name="ck_agent_keys_secret_xor",
+        ),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     key_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     digest: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # revealable secret (§5): the full token sealed under the keyring, AAD
+    # domain "key:<key_id>|<version>". NULL for keys minted before revealable
+    # storage existed — those stay digest-only and can never be revealed.
+    secret_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
+    secret_key_version: Mapped[int | None] = mapped_column(Integer)
     label: Mapped[str] = mapped_column(Text, nullable=False)
     mode: Mapped[str] = mapped_column(Text, nullable=False)
     scopes: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
@@ -132,11 +141,19 @@ class OperatorToken(Base):
     __tablename__ = "operator_tokens"
     __table_args__ = (
         CheckConstraint("expires_at IS NOT NULL", name="ck_operator_tokens_expiry_required"),
+        CheckConstraint(
+            "(secret_ciphertext IS NULL) = (secret_key_version IS NULL)",
+            name="ck_operator_tokens_secret_xor",
+        ),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     key_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     digest: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # revealable secret (§5): AAD domain "token:<key_id>|<version>"; NULL for
+    # tokens minted before revealable storage existed (never revealable).
+    secret_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
+    secret_key_version: Mapped[int | None] = mapped_column(Integer)
     label: Mapped[str] = mapped_column(Text, nullable=False)
     allow_sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)

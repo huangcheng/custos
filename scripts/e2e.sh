@@ -7,7 +7,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 LOG_DIR="/tmp/custos-e2e"
-mkdir -p "$LOG_DIR"
+# refuse a squatted log root (shared guard; see scripts/e2e_common.sh)
+. scripts/e2e_common.sh
+harden_log_dir "$LOG_DIR"
 RUN_DIR="$(mktemp -d "$LOG_DIR/run-XXXXXX")"
 PROJECT="custos-e2e-$$"
 export E2E_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
@@ -31,11 +33,11 @@ fail() { E2E_FAILED=1; echo "E2E FAIL: $1 (artifacts: $RUN_DIR; E2E_KEEP=1 keeps
 trap 'E2E_FAILED=1' ERR
 
 echo "== generate throwaway secrets"
+make_secrets_dir "$RUN_DIR"
 python3 - "$RUN_DIR" <<'PYEOF'
 import base64, os, secrets, sys
 run = sys.argv[1]
 b64url = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
-os.makedirs(f"{run}/secrets", exist_ok=True)
 pw = b64url(secrets.token_bytes(18))
 with open(f"{run}/secrets/keyring", "w") as f: f.write(f"k1:{b64url(secrets.token_bytes(32))}\n")
 with open(f"{run}/secrets/pepper", "w") as f: f.write(b64url(secrets.token_bytes(32)) + "\n")
@@ -182,7 +184,7 @@ PYEOF
 SU=$(step_up)
 CO_JSON=$(curl -fsS -m 10 -b "$RUN_DIR/cookies" -X POST "$BASE/api/admin/tokens" \
   -H "x-csrf-token: $CSRF" -H "x-step-up-token: $SU" -H 'content-type: application/json' \
-  -d "{\"label\":\"e2e-co\",\"expires_at\":\"$(python3 -c 'from datetime import UTC,datetime,timedelta; print((datetime.now(UTC)+timedelta(days=7)).isoformat())')\"}")
+  -d "{\"label\":\"e2e-co\",\"allow_sensitive\":true,\"expires_at\":\"$(python3 -c 'from datetime import UTC,datetime,timedelta; print((datetime.now(UTC)+timedelta(days=7)).isoformat())')\"}")
 CO=$(printf '%s' "$CO_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
 S=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$BASE/api/admin/keys" \
   -H "Authorization: Bearer $CO" -H 'content-type: application/json' \
@@ -199,6 +201,65 @@ minted = {x["detail"].get("key_id") for x in d["items"]}
 expected = {json.loads(a)["key_id"] for a in sys.argv[1:4]}
 assert expected <= minted, (expected, minted)
 ' "$RW_JSON" "$RO_JSON" "$SC_JSON" || fail "key.mint audit rows"
+
+echo "== revealable credentials (rev 37)"
+RW_KEY_ID_EARLY=$(printf '%s' "$RW_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["key_id"])')
+# assert both the status AND the closed error code of an explicit capture
+assert_err() { # $1 = "<body>\n<status>", $2 = expected status, $3 = expected code
+  printf '%s' "$1" | python3 -c '
+import json, sys
+body, status = sys.stdin.read().rsplit("\n", 1)
+assert status == sys.argv[1], f"status {status} != {sys.argv[1]}: {body}"
+assert json.loads(body)["code"] == sys.argv[2], body
+' "$2" "$3"
+}
+# no step-up -> 401 step_up_required
+_R=$(curl -s -m 10 -w '\n%{http_code}' -b "$RUN_DIR/cookies" \
+  "$BASE/api/admin/keys/$RW_KEY_ID_EARLY/reveal" -H "x-csrf-token: $CSRF")
+assert_err "$_R" 401 step_up_required || fail "reveal without step-up must be 401 step_up_required, got $_R"
+# session + step-up -> the exact minted token
+SU=$(step_up)
+REVEALED=$(curl -fsS -m 10 -b "$RUN_DIR/cookies" \
+  "$BASE/api/admin/keys/$RW_KEY_ID_EARLY/reveal" \
+  -H "x-csrf-token: $CSRF" -H "x-step-up-token: $SU")
+printf '%s' "$REVEALED" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+minted = json.loads(sys.argv[1])
+assert d["token"] == minted["token"], "revealed token differs from minted"
+assert d["key_id"] == minted["key_id"]
+' "$RW_JSON" || fail "key reveal round-trip"
+# the reveal is audited (allow_sensitive token reads the audit)
+RAUDIT=$(curl -fsS -m 10 "$BASE/api/admin/audit?action=key.reveal" -H "Authorization: Bearer $CO")
+printf '%s' "$RAUDIT" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert any(x["ok"] and x["detail"].get("key_id") == sys.argv[1] for x in d["items"]), "key.reveal audit row"
+' "$RW_KEY_ID_EARLY" || fail "key.reveal audit row"
+# credential reveal is session-only: even an allow_sensitive token -> 403
+CO_KEY_ID=$(printf '%s' "$CO_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["key_id"])')
+_R=$(curl -s -m 10 -w '\n%{http_code}' \
+  "$BASE/api/admin/tokens/$CO_KEY_ID/reveal" -H "Authorization: Bearer $CO")
+assert_err "$_R" 403 session_required || fail "token reveal via bearer must be 403 session_required, got $_R"
+_R=$(curl -s -m 10 -w '\n%{http_code}' \
+  "$BASE/api/admin/keys/$RW_KEY_ID_EARLY/reveal" -H "Authorization: Bearer $CO")
+assert_err "$_R" 403 session_required || fail "key reveal via bearer must be 403 session_required, got $_R"
+# operator-token reveal round-trip (session + step-up)
+SU=$(step_up)
+TREVEALED=$(curl -fsS -m 10 -b "$RUN_DIR/cookies" \
+  "$BASE/api/admin/tokens/$CO_KEY_ID/reveal" \
+  -H "x-csrf-token: $CSRF" -H "x-step-up-token: $SU")
+printf '%s' "$TREVEALED" | python3 -c '
+import json, sys
+assert json.load(sys.stdin)["token"] == sys.argv[1], "token reveal round-trip"
+' "$CO" || fail "token reveal round-trip"
+# the token reveal is audited under its OWN action (not key.reveal)
+TAUDIT=$(curl -fsS -m 10 "$BASE/api/admin/audit?action=token.reveal" -H "Authorization: Bearer $CO")
+printf '%s' "$TAUDIT" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert any(x["ok"] and x["detail"].get("key_id") == sys.argv[1] for x in d["items"]), "token.reveal audit row"
+' "$CO_KEY_ID" || fail "token.reveal audit row"
 
 echo "== assertions"
 E2E_COOKIE_JAR="$RUN_DIR/cookies" E2E_CSRF="$CSRF" \

@@ -93,7 +93,10 @@ async def test_verify_visits_newest_rows(admin_stack) -> None:
                               headers={**hdr, "x-step-up-token": su}, json={})
         assert r.status_code == 200
         data = r.json()
-        assert data["unreadable"] == {"fields": 1, "history": 0, "operator": 0}
+        assert data["unreadable"] == {
+            "fields": 1, "history": 0, "operator": 0,
+            "agent_keys": 0, "operator_tokens": 0,
+        }
         assert data["remaining"] == 0
         async with maker() as s:
             f = (await s.execute(select(Field).where(Field.secret.is_(True)))).scalars().first()

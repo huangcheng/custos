@@ -1,9 +1,12 @@
 """Agent keys (design §5): ``cu-<12 hex key_id>.<43 base64url secret>``.
 
-Storage keeps only HMAC-SHA256(pepper, presented secret text). Verification
-runs exactly one constant-time digest comparison on every path — unknown
-key_id / revoked / expired compare against a fixed dummy digest so all
-failures do equal digest work (DB-lookup timing residual accepted, §5).
+Authentication keeps only HMAC-SHA256(pepper, presented secret text) as the
+stored digest. Verification runs exactly one constant-time digest comparison
+on every path — unknown key_id / revoked / expired compare against a fixed
+dummy digest so all failures do equal digest work (DB-lookup timing residual
+accepted, §5). Mint ALSO seals the full token under the keyring (AAD domain
+``key:<key_id>|<version>``) so the operator can re-reveal it through the
+session+step-up-only admin reveal route; the draft itself never carries the secret.
 """
 
 from __future__ import annotations

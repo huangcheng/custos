@@ -21,6 +21,8 @@ pub enum TokenCommand {
     Ls,
     /// Revoke a token (session + step-up).
     Revoke { key_id: String },
+    /// Re-reveal a minted token's full value (session + step-up).
+    Reveal { key_id: String },
 }
 
 pub async fn run(client: &Client, cmd: TokenCommand, as_json: bool) -> Result<(), CliError> {
@@ -50,7 +52,8 @@ pub async fn run(client: &Client, cmd: TokenCommand, as_json: bool) -> Result<()
                         println!("{}", serde_json::to_string_pretty(&out)?);
                     } else {
                         println!("{token}");
-                        eprintln!("(this is the only time the token is shown)");
+                        let kid = out.get("key_id").and_then(|v| v.as_str()).unwrap_or("<key_id>");
+                        eprintln!("(key_id {kid}; re-reveal later with `custos token reveal {kid}`)");
                     }
                 }
                 None => return Err(CliError::Config("server returned no token".into())),
@@ -72,6 +75,26 @@ pub async fn run(client: &Client, cmd: TokenCommand, as_json: bool) -> Result<()
                 )
                 .await?;
             println!("revoked {key_id}");
+        }
+        TokenCommand::Reveal { key_id } => {
+            let step_up = super::key::prompt_step_up(client).await?;
+            let out = client
+                .get_step_up(
+                    RouteClass::SessionOnly,
+                    &format!("/api/admin/tokens/{}/reveal", Client::seg(&key_id)),
+                    &step_up,
+                )
+                .await?;
+            match out.get("token").and_then(Value::as_str) {
+                Some(secret) => {
+                    if as_json {
+                        println!("{}", serde_json::to_string_pretty(&out)?);
+                    } else {
+                        println!("{secret}");
+                    }
+                }
+                None => return Err(CliError::Config("server returned no token".into())),
+            }
         }
     }
     Ok(())

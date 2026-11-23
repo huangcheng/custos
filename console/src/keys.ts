@@ -42,6 +42,33 @@ export function scopeSummary(key: { scopes: string[] }): string {
   return key.scopes.join(", ");
 }
 
+// Shared credential-row display logic (Keys + Settings tokens): one source
+// for enablement, tooltip, and the expiry cell so they cannot drift.
+export const isExpired = (expiresAt: string | null | undefined): boolean =>
+  typeof expiresAt === "string" && new Date(expiresAt).getTime() <= Date.now();
+
+export function credentialAbout(c: { label: string; key_id: string; mode?: string }): string {
+  return c.mode ? `${c.label} · ${c.mode} · ${c.key_id}` : `${c.label} · ${c.key_id}`;
+}
+
+export function revealBlocker(row: {
+  has_secret?: boolean;
+  expires_at: string | null;
+}): string | undefined {
+  if (row.has_secret === false) return "not recoverable — revoke and re-mint";
+  if (isExpired(row.expires_at)) return "expired — revoke and re-mint";
+  return undefined;
+}
+
+export function expiryLabel(row: {
+  revoked_at?: string | null;
+  expires_at: string | null;
+}): string {
+  if (row.revoked_at) return "revoked";
+  if (typeof row.expires_at !== "string") return "never";
+  return isExpired(row.expires_at) ? "expired" : row.expires_at.slice(0, 10);
+}
+
 export function tokenExpiryBody(form: { label: string; allowSensitive: boolean; expiresAt: string }): Record<string, unknown> {
   const label = form.label.trim();
   if (label.length === 0) throw new KeyFormError("label is required");

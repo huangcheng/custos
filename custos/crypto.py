@@ -91,6 +91,16 @@ def operator_aad(version: int) -> bytes:
     return f"operator:totp|{version}".encode()
 
 
+def key_aad(key_id: str, version: int) -> bytes:
+    """Revealable agent-key secret (§5): bound to the key_id, never to a row uuid."""
+    return f"key:{key_id}|{version}".encode()
+
+
+def token_aad(key_id: str, version: int) -> bytes:
+    """Revealable operator-token secret (§5): separate domain from agent keys."""
+    return f"token:{key_id}|{version}".encode()
+
+
 def operator_seal_key(key: bytes) -> bytes:
     """HKDF-SHA256(ikm=keyring key, salt=empty, info pinned) — operator domain."""
     return HKDF(algorithm=SHA256(), length=KEY_LEN, salt=None, info=_OPERATOR_INFO).derive(key)
@@ -134,6 +144,10 @@ class Vault:
             return history_aad(row_id, version)
         if domain == "operator:totp":
             return operator_aad(version)
+        if domain == "key":
+            return key_aad(row_id, version)
+        if domain == "token":
+            return token_aad(row_id, version)
         raise CryptoError(f"unknown AAD domain {domain!r}")
 
     def seal(self, domain: str, row_id: str, plaintext: bytes) -> tuple[bytes, int]:

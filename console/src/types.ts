@@ -61,6 +61,7 @@ export type KeyRow = {
   expires_at: string | null;
   revoked_at?: string | null;
   created_at?: string;
+  has_secret?: boolean;
 };
 
 export type MintedKey = KeyRow & { token: string };
@@ -72,6 +73,7 @@ export type TokenRow = {
   expires_at: string;
   revoked_at?: string | null;
   created_at?: string;
+  has_secret?: boolean;
 };
 
 export type MintedToken = TokenRow & { token: string };
@@ -99,7 +101,13 @@ export type RekeyResult = {
 
 export type VerifyResult = {
   remaining: number;
-  unreadable: { fields: number; history: number; operator: number };
+  unreadable: {
+    fields: number;
+    history: number;
+    operator: number;
+    agent_keys: number;
+    operator_tokens: number;
+  };
   run_token?: string;
   cursor?: string;
 };

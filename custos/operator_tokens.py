@@ -3,7 +3,9 @@
 Same HMAC/constant-time mechanics as agent keys but a SEPARATE table — an
 agent key can never authenticate on the admin plane and vice versa
 (prefix + table lookup). Expiry is mandatory: max 90 days, allow_sensitive
-tokens max 30 days (§5); mint rejects absent/past/over-cap expiry.
+tokens max 30 days (§5); mint rejects absent/past/over-cap expiry. Mint ALSO
+seals the full token under the keyring (AAD ``token:<key_id>|<version>``)
+for session+step-up-only re-reveal; the draft never carries the secret.
 """
 
 from __future__ import annotations

@@ -30,8 +30,9 @@ log, an audit row, or an error message.
 
 Some admin routes are **session + step-up only** and refuse any token with
 `403 session_required` before looking at state: `purge`, `force-drop`,
-`retention`, and minting/revoking keys or tokens. Reveal, history-reveal,
-admin env, rekey, and restore accept an `allow_sensitive` token instead.
+`retention`, minting/revoking keys or tokens, and re-revealing a minted
+key/token. Item reveal, history-reveal, admin env, rekey, and restore accept
+an `allow_sensitive` token instead.
 
 ## Quick start
 
