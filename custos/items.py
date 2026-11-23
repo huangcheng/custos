@@ -21,7 +21,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from custos.audit import record_audit
+from custos.audit import add_audit_row
 from custos.crypto import UnreadableError, Vault
 from custos.db.models import Field, FieldHistory, Item
 from custos.errors import AppError
@@ -526,9 +526,11 @@ async def force_drop(
     actor_kind: str,
 ) -> int:
     """Operator escape (§4): delete unreadable field/history rows of ONE item
-    (trial decryption bounded to this item). Keeps readable rows and the item
-    row with its deleted_at state. Returns the dropped count. Operator plane
-    only (§5/§6): the caller must pass an operator actor kind."""
+    (trial decryption bounded to this item's own rows). Keeps readable rows
+    and the item row with its deleted_at state. Returns the dropped count.
+    Operator plane only (§5/§6): the caller must pass an operator actor kind.
+    `maker` is retained for signature uniformity with the other item ops; the
+    success audit now commits in the caller's transaction (no own session)."""
     if actor_kind not in ("operator_session", "local_process"):
         raise AppError("session_required", "force-drop is operator-only")
     item = await _lock_item(session, name)
@@ -565,8 +567,10 @@ async def force_drop(
     if dropped:
         item.revision += 1
     await session.flush()
-    await record_audit(
-        maker,
+    # success audit commits WITH the drop (§4): a failed outer commit must
+    # leave no ok:true force_drop row for rows that were never deleted
+    add_audit_row(
+        session,
         actor_kind=actor_kind,
         actor_id="local" if actor_kind == "local_process" else p.actor_id,
         actor_label=p.actor_label,

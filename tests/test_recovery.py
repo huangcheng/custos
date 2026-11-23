@@ -130,6 +130,10 @@ async def test_change_password_revokes_and_promotes(maker) -> None:
         full, full_cookie = await create_session(s, purpose="full")
         s.add(OperatorToken(key_id="abcdef012345", digest=b"d" * 32, label="t",
                             expires_at=datetime.now(UTC)))
+        from custos.db.models import PasskeyCredential
+
+        s.add(PasskeyCredential(credential_id=b"cu-test-cred", public_key=b"cu-test-pk",
+                                label="attacker-registered"))
         await s.commit()
         rr_id = rr.id
     async with maker() as s:
@@ -151,6 +155,10 @@ async def test_change_password_revokes_and_promotes(maker) -> None:
         # operator tokens revoked
         tok = (await s.execute(select(OperatorToken))).scalar_one()
         assert tok.revoked_at is not None
+        # attacker-registered passkeys never survive promotion (§5)
+        from custos.db.models import PasskeyCredential
+
+        assert (await s.execute(select(PasskeyCredential))).scalars().all() == []
         # old codes consumed, new ones work
         assert not await consume_code(s, PEPPER, codes[0])
         assert await consume_code(s, PEPPER, fresh_codes[0])

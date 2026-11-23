@@ -88,7 +88,8 @@ async def approve_device(
     new_expiry = max(row.expires_at, now + timedelta(seconds=_TRANSFER_TTL))
     result = await session.execute(
         update(DeviceCode)
-        .where(DeviceCode.id == row.id, DeviceCode.approved_by_session.is_(None))
+        .where(DeviceCode.id == row.id, DeviceCode.approved_by_session.is_(None),
+               DeviceCode.expires_at > now)
         .values(approved_by_session=sess.id, approved_at=now,
                 transfer_hash=_hash(transfer), expires_at=new_expiry)
     )

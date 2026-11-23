@@ -4,7 +4,8 @@
 as HMAC(pepper, normalized code). Verification scans unconsumed rows with
 constant-time compare; consume is a guarded single-use UPDATE. Password
 change revokes sessions/tokens/codes and promotes a recovery_reset session
-to full, atomically disabling TOTP and issuing fresh codes.
+to full, atomically disabling TOTP, deleting passkeys, and issuing fresh
+codes.
 """
 
 from __future__ import annotations
@@ -17,7 +18,13 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from custos.crypto import credential_digest, digests_equal
-from custos.db.models import OperatorAccount, OperatorSession, OperatorToken, RecoveryCode
+from custos.db.models import (
+    OperatorAccount,
+    OperatorSession,
+    OperatorToken,
+    PasskeyCredential,
+    RecoveryCode,
+)
 from custos.errors import AppError
 from custos.operator.account import hash_password, validate_password, verify_password
 from custos.operator.sessions import create_session, revoke_all_sessions
@@ -63,9 +70,13 @@ async def consume_code(session: AsyncSession, pepper: bytes, presented: str) -> 
         ).scalars()
     )
     matched_id = None
-    for row in rows:
-        # compare every row (no early exit) so the match position is not leaked
-        if digests_equal(row.digest, target):
+    # constant-time compares padded to 10 with dummy digests — timing never
+    # leaks the remaining-code count; max() guards the transient >10 case if
+    # concurrent issuances ever break the ≤10-live invariant (no code skipped)
+    dummy = bytes(32)
+    for i in range(max(10, len(rows))):
+        row = rows[i] if i < len(rows) else None
+        if digests_equal(row.digest if row is not None else dummy, target) and row is not None:
             matched_id = row.id
     if matched_id is None:
         return False
@@ -135,13 +146,16 @@ async def change_password(
 
     fresh_codes: list[str] = []
     if is_recovery:
-        # promote in place: full purpose, fresh TTLs, TOTP off, fresh codes
+        # promote in place: full purpose, fresh TTLs, TOTP off, passkeys gone
+        # (attacker-registered factors must not survive recovery — reset-mfa
+        # parity), fresh codes
         sess_row.purpose = "full"
         sess_row.idle_ttl_seconds = 43200
         sess_row.absolute_expires_at = datetime.now(UTC) + timedelta(days=7)
         acct.totp_enabled = False
         acct.totp_secret = None
         acct.totp_key_version = None
+        await session.execute(delete(PasskeyCredential))
         fresh_codes = await issue_codes(session, pepper)
         promoted = sess_row
         cookie = ""  # recovery_reset keeps its existing cookie (promoted in place)

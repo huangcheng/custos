@@ -119,11 +119,10 @@ class MCPRequestGate:
         except AppError as exc:
             await _plain_response(send, exc.status, exc.code, exc.headers)
             return
-        status_holder: dict[str, int] = {}
+        status_holder: dict[str, Any] = {}
 
         async def _send(message: Any) -> None:
             if message["type"] == "http.response.start":
-                status_holder["status"] = message["status"]
                 limited_exc = _RATE_LIMITED.get()
                 if message["status"] == 401 and limited_exc is not None:
                     # verified key, exhausted bucket: rewrite to the limiter's
@@ -138,17 +137,42 @@ class MCPRequestGate:
                               for k, v in (exc.headers or {}).items()],
                         ],
                     }
-                    status_holder["status"] = exc.status
-                    status_holder["rewrite_body"] = True
+                    status_holder["rewrite_body"] = "rate_limited"
+                elif message["status"] == 401:
+                    # failed credential: ledger pair BEFORE the response (§4).
+                    # If the ledger write itself fails, fail closed with the
+                    # internal_error envelope — parity with the REST plane.
+                    limiter.record_failed_auth(ip)
+                    try:
+                        await record_auth_event(
+                            state.session_maker, kind="agent_auth", ok=False, ip=ip,
+                            peer_ip=peer_ip, budget=state.ledger_budget,
+                            counter=state.failure_counter,
+                        )
+                        await record_audit(
+                            state.session_maker, actor_kind="anonymous", actor_id=None,
+                            actor_label="anonymous", action="auth.failure", item_name=None,
+                            ok=False, detail={"ip": ip, "reason": "agent_auth"},
+                            budget=state.ledger_budget, counter=state.failure_counter,
+                        )
+                    except LedgerError:
+                        logger.warning("MCP auth-failure ledger write failed (failing closed)")
+                        message = {
+                            "type": "http.response.start",
+                            "status": 500,
+                            "headers": [(b"content-type", b"application/json")],
+                        }
+                        status_holder["rewrite_body"] = "internal_error"
                 await send(message)
                 return
             if message["type"] == "http.response.body" and status_holder.get("rewrite_body"):
                 import json as _json
 
+                code = status_holder["rewrite_body"]
                 message = {
                     "type": "http.response.body",
-                    "body": _json.dumps({"code": "rate_limited",
-                                         "message": "rate limited"}).encode(),
+                    "body": _json.dumps({"code": code,
+                                         "message": code.replace("_", " ")}).encode(),
                 }
             await send(message)
 
@@ -162,24 +186,6 @@ class MCPRequestGate:
             slot = _SLOT_KEY.get()
             if slot is not None:
                 limiter.release_agent_slot(slot)
-            status = status_holder.get("status", 500)
-            if status == 401:
-                # verified-and-failed credential (or missing): one ledger pair
-                limiter.record_failed_auth(ip)
-                try:
-                    await record_auth_event(
-                        state.session_maker, kind="agent_auth", ok=False, ip=ip,
-                        peer_ip=peer_ip, budget=state.ledger_budget,
-                        counter=state.failure_counter,
-                    )
-                    await record_audit(
-                        state.session_maker, actor_kind="anonymous", actor_id=None,
-                        actor_label="anonymous", action="auth.failure", item_name=None,
-                        ok=False, detail={"ip": ip, "reason": "agent_auth"},
-                        budget=state.ledger_budget, counter=state.failure_counter,
-                    )
-                except LedgerError:
-                    logger.warning("MCP auth-failure ledger write failed (failing closed)")
 
 async def _plain_response(send: Any, status: int, code: str,
                           headers: dict[str, str] | None) -> None:

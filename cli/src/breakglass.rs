@@ -137,27 +137,35 @@ pub async fn reset_password(dsn: &str) -> Result<(), CliError> {
         .transaction()
         .await
         .map_err(|e| CliError::Config(e.to_string()))?;
-    tx.execute(
-        "UPDATE operator_account SET password_hash = $1 WHERE id = 1",
-        &[&phc],
-    )
-    .await
-    .map_err(|e| CliError::Config(format!("cannot update the password: {e}")))?;
+    let updated = tx
+        .execute(
+            "UPDATE operator_account SET password_hash = $1 WHERE id = 1",
+            &[&phc],
+        )
+        .await
+        .map_err(|e| CliError::Config(format!("cannot update the password: {e}")))?;
+    if updated != 1 {
+        return Err(CliError::Config(
+            "no operator account exists; complete setup first".into(),
+        ));
+    }
     tx.execute("DELETE FROM step_up_tokens", &[])
         .await
         .map_err(|e| CliError::Config(e.to_string()))?;
-    tx.execute(
-        "UPDATE operator_sessions SET revoked_at = now() WHERE revoked_at IS NULL",
-        &[],
-    )
-    .await
-    .map_err(|e| CliError::Config(e.to_string()))?;
-    tx.execute(
-        "UPDATE operator_tokens SET revoked_at = now() WHERE revoked_at IS NULL",
-        &[],
-    )
-    .await
-    .map_err(|e| CliError::Config(e.to_string()))?;
+    let sessions = tx
+        .execute(
+            "UPDATE operator_sessions SET revoked_at = now() WHERE revoked_at IS NULL",
+            &[],
+        )
+        .await
+        .map_err(|e| CliError::Config(e.to_string()))?;
+    let tokens = tx
+        .execute(
+            "UPDATE operator_tokens SET revoked_at = now() WHERE revoked_at IS NULL",
+            &[],
+        )
+        .await
+        .map_err(|e| CliError::Config(e.to_string()))?;
     let consumed = tx
         .execute(
             "UPDATE recovery_codes SET consumed_at = now() WHERE consumed_at IS NULL",
@@ -168,7 +176,10 @@ pub async fn reset_password(dsn: &str) -> Result<(), CliError> {
     audit(
         &tx,
         "operator.password_change",
-        serde_json::json!({ "break_glass": true, "codes_consumed": consumed }),
+        serde_json::json!({
+            "break_glass": true, "codes_consumed": consumed,
+            "tokens_revoked": tokens, "sessions_invalidated": sessions,
+        }),
     )
     .await?;
     tx.commit()
@@ -215,23 +226,28 @@ pub async fn reset_mfa(dsn: &str) -> Result<(), CliError> {
     tx.execute("DELETE FROM step_up_tokens", &[])
         .await
         .map_err(|e| CliError::Config(e.to_string()))?;
-    tx.execute(
-        "UPDATE operator_sessions SET revoked_at = now() WHERE revoked_at IS NULL",
-        &[],
-    )
-    .await
-    .map_err(|e| CliError::Config(e.to_string()))?;
-    tx.execute(
-        "UPDATE operator_tokens SET revoked_at = now() WHERE revoked_at IS NULL",
-        &[],
-    )
-    .await
-    .map_err(|e| CliError::Config(e.to_string()))?;
+    let sessions = tx
+        .execute(
+            "UPDATE operator_sessions SET revoked_at = now() WHERE revoked_at IS NULL",
+            &[],
+        )
+        .await
+        .map_err(|e| CliError::Config(e.to_string()))?;
+    let tokens = tx
+        .execute(
+            "UPDATE operator_tokens SET revoked_at = now() WHERE revoked_at IS NULL",
+            &[],
+        )
+        .await
+        .map_err(|e| CliError::Config(e.to_string()))?;
 
     audit(
         &tx,
         "operator.totp_change",
-        serde_json::json!({ "break_glass": true }),
+        serde_json::json!({
+            "break_glass": true,
+            "tokens_revoked": tokens, "sessions_invalidated": sessions,
+        }),
     )
     .await?;
     audit(
@@ -258,45 +274,140 @@ pub async fn reset_mfa(dsn: &str) -> Result<(), CliError> {
 /// `custos account retention` — the emergency prune with no session (§9).
 ///
 /// This is the LAST-RESORT path when no session can be obtained, and it prunes
-/// the SAME set the server's `POST /api/admin/retention` does:
-/// `field_history` (respecting the 20-newest floor), `audit`, `auth_events`,
-/// dead `operator_sessions`, consumed/expired `step_up_tokens`, expired/consumed
-/// `device_codes` and `webauthn_challenges`, and stale `lockout_suppressions`.
-/// `CUSTOS_RETENTION_DAYS` (floor 7) sets the window.
+/// the SAME set the server's `POST /api/admin/retention` does
+/// (`custos/retention.py::run_retention` — KEEP IN LOCKSTEP):
+/// `field_history` (BOTH older than the window AND outside the 20-newest
+/// floor), `audit`, `auth_events`, dead `operator_sessions` (revoked OR
+/// absolute-expired OR idle-expired, mirroring `resolve_session`), their bound
+/// plus consumed/expired `step_up_tokens`, `device_codes`, `webauthn_challenges`
+/// (dependents FIRST — the session FKs are NO ACTION), and stale
+/// `lockout_suppressions`. `CUSTOS_RETENTION_DAYS` (default 365, floor 7) sets
+/// the window. One transaction; the audit row commits with the prune.
 pub async fn retention(dsn: &str) -> Result<(), CliError> {
+    let days: i32 = match std::env::var("CUSTOS_RETENTION_DAYS") {
+        Ok(raw) => raw
+            .trim()
+            .parse()
+            .map_err(|_| CliError::Config("CUSTOS_RETENTION_DAYS must be an integer".into()))?,
+        Err(_) => 365,
+    };
+    if days < 7 {
+        return Err(CliError::Config(
+            "the retention window must be at least 7 days".into(),
+        ));
+    }
+    // irreversible direct-DB prune: state the window BEFORE deleting (the
+    // shell env may differ from the server process's configured window)
+    println!("pruning with a {days}-day window (CUSTOS_RETENTION_DAYS; server default 365)");
     let mut client = connect(dsn).await?;
     let tx = client
         .transaction()
         .await
         .map_err(|e| CliError::Config(e.to_string()))?;
-    let sessions = tx
+
+    // history: rank over ALL snapshots per (item_id, name); prune only rows
+    // BOTH older than the cutoff AND outside the 20-newest floor
+    // (HISTORY_BUDGET in custos/items.py).
+    let history = tx
         .execute(
-            "DELETE FROM operator_sessions WHERE revoked_at IS NOT NULL \
-             OR absolute_expires_at <= now()",
+            "DELETE FROM field_history WHERE id IN ( \
+               SELECT id FROM ( \
+                 SELECT id, superseded_at, row_number() OVER ( \
+                   PARTITION BY item_id, name \
+                   ORDER BY superseded_at DESC, id DESC) AS rn \
+                 FROM field_history) r \
+               WHERE r.rn > 20 AND r.superseded_at < now() - make_interval(days => $1))",
+            &[&days],
+        )
+        .await
+        .map_err(|e| CliError::Config(format!("prune field_history: {e}")))?;
+    let audit_n = tx
+        .execute(
+            "DELETE FROM audit WHERE ts < now() - make_interval(days => $1)",
+            &[&days],
+        )
+        .await
+        .map_err(|e| CliError::Config(format!("prune audit: {e}")))?;
+    let events = tx
+        .execute(
+            "DELETE FROM auth_events WHERE ts < now() - make_interval(days => $1)",
+            &[&days],
+        )
+        .await
+        .map_err(|e| CliError::Config(format!("prune auth_events: {e}")))?;
+
+    // dead sessions mirror resolve_session EXACTLY (idle rule: last_seen +
+    // idle_ttl <= now; idle 0 → absolute check only). Lock the candidates so
+    // concurrent refreshes/revokes cannot disagree with the dependent deletes.
+    let dead_rows = tx
+        .query(
+            "SELECT id::text FROM operator_sessions WHERE revoked_at IS NOT NULL \
+             OR absolute_expires_at <= now() \
+             OR (idle_ttl_seconds > 0 AND last_seen_at + make_interval(secs => idle_ttl_seconds) <= now()) \
+             FOR UPDATE",
             &[],
         )
         .await
-        .map_err(|e| CliError::Config(e.to_string()))?;
+        .map_err(|e| CliError::Config(format!("select dead sessions: {e}")))?;
+    let dead: Vec<String> = dead_rows.iter().map(|r| r.get(0)).collect();
+
+    // dependents FIRST (session FKs are NO ACTION), then the sessions.
+    // ids bind as text[] and cast in SQL (no uuid feature in tokio-postgres).
     let step_ups = tx
         .execute(
-            "DELETE FROM step_up_tokens WHERE consumed_at IS NOT NULL OR expires_at <= now()",
-            &[],
+            "DELETE FROM step_up_tokens WHERE consumed_at IS NOT NULL \
+             OR expires_at <= now() OR session_id = ANY($1::text[]::uuid[])",
+            &[&dead],
         )
         .await
-        .map_err(|e| CliError::Config(e.to_string()))?;
+        .map_err(|e| CliError::Config(format!("prune step_up_tokens: {e}")))?;
+    let devices = tx
+        .execute(
+            "DELETE FROM device_codes WHERE consumed_at IS NOT NULL \
+             OR expires_at <= now() OR approved_by_session = ANY($1::text[]::uuid[])",
+            &[&dead],
+        )
+        .await
+        .map_err(|e| CliError::Config(format!("prune device_codes: {e}")))?;
+    let challenges = tx
+        .execute(
+            "DELETE FROM webauthn_challenges WHERE consumed_at IS NOT NULL \
+             OR expires_at <= now() OR session_id = ANY($1::text[]::uuid[])",
+            &[&dead],
+        )
+        .await
+        .map_err(|e| CliError::Config(format!("prune webauthn_challenges: {e}")))?;
+    let sessions = tx
+        .execute(
+            "DELETE FROM operator_sessions WHERE id = ANY($1::text[]::uuid[])",
+            &[&dead],
+        )
+        .await
+        .map_err(|e| CliError::Config(format!("prune operator_sessions: {e}")))?;
+    let suppressions = tx
+        .execute(
+            "DELETE FROM lockout_suppressions \
+             WHERE suppressed_until_events_ts < now() - make_interval(days => $1)",
+            &[&days],
+        )
+        .await
+        .map_err(|e| CliError::Config(format!("prune lockout_suppressions: {e}")))?;
+
+    let total = history + audit_n + events + step_ups + devices + challenges + sessions + suppressions;
     audit(
         &tx,
         "retention",
-        serde_json::json!({
-            "break_glass": true,
-            "count": sessions + step_ups,
-        }),
+        serde_json::json!({ "break_glass": true, "pruned": total }),
     )
     .await?;
     tx.commit()
         .await
         .map_err(|e| CliError::Config(e.to_string()))?;
-    println!("pruned {sessions} session(s) and {step_ups} step-up token(s)");
+    println!(
+        "pruned {total} row(s) over {days} day(s): {history} history, {audit_n} audit, \
+         {events} auth_events, {step_ups} step_up_tokens, {devices} device_codes, \
+         {challenges} webauthn_challenges, {sessions} sessions, {suppressions} lockout_suppressions"
+    );
     Ok(())
 }
 

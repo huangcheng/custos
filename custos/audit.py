@@ -24,7 +24,8 @@ ACTION_ENUM: frozenset[str] = frozenset(
     {
         "list", "search", "get", "env", "create", "put", "patch", "delete", "restore",
         "purge", "force_drop", "history", "reveal", "device.login", "key.mint",
-        "key.revoke", "key.list", "token.mint", "token.revoke", "token.list",
+        "key.revoke", "key.list", "key.reveal", "token.mint", "token.revoke",
+        "token.list", "token.reveal",
         "operator.login", "operator.logout", "operator.step_up",
         "operator.password_change", "operator.totp_change", "operator.passkey_change",
         "operator.recovery_regen", "operator.setup", "account.unlock", "rekey",
@@ -48,6 +49,7 @@ DETAIL_KEYS: frozenset[str] = frozenset(
         "pre_revision", "revision", "evicted", "evicted_ids", "dropped_unreadable",
         "codes_consumed", "count", "remaining", "skipped", "key_id", "break_glass",
         "allow_sensitive", "allow_hazardous", "ip", "stage", "reason", "created", "pruned",
+        "tokens_revoked", "sessions_invalidated",
     }
 )
 
@@ -77,7 +79,8 @@ def _validate_actor(actor_kind: str, actor_id: str | None) -> None:
 
 
 class LedgerError(Exception):
-    """Ledger write failed; the caller must fail the request closed (503)."""
+    """Ledger write failed; the caller must fail the request closed
+    (500 internal_error — the closed §6 envelope, same on REST and MCP)."""
 
 
 class LedgerBudget:
@@ -171,17 +174,23 @@ class FailureCounter:
         self._evict_overflow()
 
     def nth_most_recent_ts(
-        self, n: int, *, ip: str | None = None, account: bool = False
+        self, n: int, *, ip: str | None = None, account: bool = False,
+        floor: float | None = None,
     ) -> float | None:
         """Monotonic ts of the Nth-most-recent event in the window (anchor for
-        non-extending lockout under the flood fallback), or None if fewer."""
+        non-extending lockout under the flood fallback), or None if fewer.
+        `floor` (monotonic) ignores events at or before it — the suppression
+        marker bridge so break-glass unlock clears counter-only blocks too."""
         key = "account" if account else f"ip:{ip}"
         events = self._events.get(key)
         if events is None:
             return None
         now = time.monotonic()
         window = self._account_window if account else self._window
-        live = [t for t in events if now - t <= window]
+        live = [
+            t for t in events
+            if now - t <= window and (floor is None or t > floor)
+        ]
         if len(live) < n:
             return None
         return sorted(live)[-n]

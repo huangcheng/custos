@@ -13,7 +13,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 LOG_DIR="/tmp/custos-e2e"
-mkdir -p "$LOG_DIR"
+# refuse a squatted log root (shared guard; see scripts/e2e_common.sh)
+. scripts/e2e_common.sh
+harden_log_dir "$LOG_DIR"
 RUN_DIR="$(mktemp -d "$LOG_DIR/startup-XXXXXX")"
 PROJECT="custos-e2e-startup-$$"
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
@@ -42,8 +44,16 @@ echo "== base secrets"
 python3 - "$RUN_DIR" "$DB_PASSWORD" <<'PYEOF'
 import base64, os, subprocess, sys
 run, pw = sys.argv[1], sys.argv[2]
+if os.path.islink(run) or os.path.realpath(run) != os.path.join(
+        os.path.realpath(os.path.dirname(run)), os.path.basename(run)):
+    sys.exit("refusing symlinked run dir")
 b64url = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
 os.makedirs(f"{run}/secrets", exist_ok=True)
+if os.path.islink(f"{run}/secrets") or os.path.realpath(f"{run}/secrets") != os.path.join(
+        os.path.realpath(run), "secrets"):
+    sys.exit("refusing symlinked secrets dir")
+if os.stat(f"{run}/secrets").st_uid != os.getuid():
+    sys.exit("secrets dir is not owned by the running user")
 
 def write(name, body):
     with open(f"{run}/secrets/{name}", "w") as f:

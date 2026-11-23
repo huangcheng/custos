@@ -4,7 +4,10 @@ Sliding 15-min window. Per-IP: 10 failures → 15-min block. Per-account:
 30 failures → 30-min block, NON-extending (anchored at the 30th failure;
 later failures during the block do not push the end). Suppressions
 (`ip:<addr>`, `ip:*`, `account`) make lockout queries ignore ledger rows at
-or before the marker ts. `agent_auth` never counts here (it has its own
+or before the marker ts — and clear the in-process flood-fallback counter
+too (wall-clock marker converted to the process monotonic clock), so
+break-glass unlock works even under ledger-budget exhaustion.
+`agent_auth` never counts here (it has its own
 30/min/IP request limiter). `setup` counts per-IP only (no account yet).
 """
 
@@ -48,24 +51,38 @@ async def check_lockout(
     counter: FailureCounter | None = None,
 ) -> None:
     now = datetime.now(UTC)
+    ip_supp = await _suppression_ts(session, f"ip:{ip}")
+    wild_supp = await _suppression_ts(session, "ip:*")
+    acct_supp = await _suppression_ts(session, "account") if account_exists else None
 
     # Flood fallback (§5): when the global ledger budget is exhausted,
     # failures live only in the in-process counter. Mirror the ledger's
-    # non-extending anchor (Nth-most-recent failure + block). Suppressions
-    # cannot clear counter-only blocks (monotonic ts vs wall-clock markers);
-    # break-glass unlock clears the ledger path — documented limitation.
+    # non-extending anchor (Nth-most-recent failure + block). Suppression
+    # markers clear counter-only blocks too: the wall-clock marker is
+    # converted to the process's monotonic clock, and events at or before
+    # it are ignored — so break-glass unlock works under budget exhaustion.
     if counter is not None:
         import time as _time
 
         mono_now = _time.monotonic()
-        ip_anchor = counter.nth_most_recent_ts(_IP_THRESHOLD, ip=ip)
+
+        def _mono_floor(supp: datetime | None) -> float | None:
+            if supp is None:
+                return None
+            return mono_now - (now - supp).total_seconds()
+
+        ip_supps = [s for s in (ip_supp, wild_supp) if s is not None]
+        ip_floor_mono = _mono_floor(max(ip_supps)) if ip_supps else None
+        ip_anchor = counter.nth_most_recent_ts(_IP_THRESHOLD, ip=ip, floor=ip_floor_mono)
         if ip_anchor is not None:
             remaining = _IP_BLOCK - (mono_now - ip_anchor)
             if remaining > 0:
                 raise AppError("locked_out", "too many attempts",
                                headers={"Retry-After": str(int(remaining) + 1)})
         if account_exists:
-            acct_anchor = counter.nth_most_recent_ts(_ACCOUNT_THRESHOLD, account=True)
+            acct_anchor = counter.nth_most_recent_ts(
+                _ACCOUNT_THRESHOLD, account=True, floor=_mono_floor(acct_supp)
+            )
             if acct_anchor is not None:
                 remaining = _ACCOUNT_BLOCK - (mono_now - acct_anchor)
                 if remaining > 0:
@@ -73,8 +90,6 @@ async def check_lockout(
                                    headers={"Retry-After": str(int(remaining) + 1)})
 
     # per-IP window (setup counts here too)
-    ip_supp = await _suppression_ts(session, f"ip:{ip}")
-    wild_supp = await _suppression_ts(session, "ip:*")
     ip_floor = now - timedelta(seconds=_IP_WINDOW)
     for supp in (ip_supp, wild_supp):
         if supp is not None and supp > ip_floor:
@@ -107,7 +122,6 @@ async def check_lockout(
     if not account_exists:
         return  # no account → per-account window cannot apply (setup path)
 
-    acct_supp = await _suppression_ts(session, "account")
     acct_floor = now - timedelta(seconds=_ACCOUNT_WINDOW)
     if acct_supp is not None and acct_supp > acct_floor:
         acct_floor = acct_supp

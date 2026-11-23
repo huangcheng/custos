@@ -206,3 +206,28 @@ async def test_flood_counter_anchor_non_extending(maker) -> None:
         with pytest.raises(AppError) as e2:
             await check_lockout(s, ip="203.0.113.71", account_exists=False, counter=counter2)
         assert int(e2.value.headers["Retry-After"]) > 14 * 60
+
+
+async def test_suppression_clears_counter_only_block(maker) -> None:
+    """Break-glass unlock must work under ledger-budget exhaustion: the
+    marker clears the in-process fallback counter, not just ledger rows."""
+    from custos.audit import FailureCounter
+
+    ip = "203.0.113.77"
+    counter = FailureCounter()
+    for _ in range(10):
+        counter.record(ip=ip)
+    for _ in range(30):
+        counter.record(account=True)
+    async with maker() as s:
+        with pytest.raises(AppError) as e:
+            await check_lockout(s, ip=ip, account_exists=True, counter=counter)
+        assert e.value.code == "locked_out"
+    async with maker() as s:
+        s.add(LockoutSuppression(scope="ip:*",
+                                 suppressed_until_events_ts=datetime.now(UTC)))
+        s.add(LockoutSuppression(scope="account",
+                                 suppressed_until_events_ts=datetime.now(UTC)))
+        await s.commit()
+    async with maker() as s:
+        await check_lockout(s, ip=ip, account_exists=True, counter=counter)

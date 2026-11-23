@@ -54,26 +54,26 @@ async def logout(
     request: Request, response: Response,
     sess: OperatorSession = Depends(require_session),
 ) -> dict[str, Any]:
-    from custos.audit import record_audit
+    from custos.audit import add_audit_row
     from custos.operator.sessions import clear_session_cookie, revoke_session
 
     async with request.app.state.session_maker() as session:
         await revoke_session(session, sess.id)
+        add_audit_row(
+            session, actor_kind="operator_session",
+            actor_id=str(sess.id), actor_label="operator", action="operator.logout",
+            item_name=None, ok=True, detail={},
+        )
         await session.commit()
-    await record_audit(
-        request.app.state.session_maker, actor_kind="operator_session",
-        actor_id=str(sess.id), actor_label="operator", action="operator.logout",
-        item_name=None, ok=True, detail={},
-    )
     clear_session_cookie(response)
     return {"logout": "complete"}
 
 
-async def _totp_audit(request: Request, sess: OperatorSession, reason: str) -> None:
-    from custos.audit import record_audit
+def _totp_audit(session: Any, sess: OperatorSession, reason: str) -> None:
+    from custos.audit import add_audit_row
 
-    await record_audit(
-        request.app.state.session_maker, actor_kind="operator_session",
+    add_audit_row(
+        session, actor_kind="operator_session",
         actor_id=str(sess.id), actor_label="operator", action="operator.totp_change",
         item_name=None, ok=True, detail={"reason": reason},
     )
@@ -107,16 +107,16 @@ async def passkey_reg_verify(
 
     _passkeys_enabled(request)
     body = await _json_body(request)
+    from custos.audit import add_audit_row
+
     async with request.app.state.session_maker() as session:
         await passkeys.register_verify(session, request.app.state.settings, sess.id, body)
+        add_audit_row(
+            session, actor_kind="operator_session",
+            actor_id=str(sess.id), actor_label="operator", action="operator.passkey_change",
+            item_name=None, ok=True, detail={"reason": "register"},
+        )
         await session.commit()
-    from custos.audit import record_audit
-
-    await record_audit(
-        request.app.state.session_maker, actor_kind="operator_session",
-        actor_id=str(sess.id), actor_label="operator", action="operator.passkey_change",
-        item_name=None, ok=True, detail={"reason": "register"},
-    )
     return {"passkey": "registered"}
 
 
@@ -146,19 +146,19 @@ async def passkey_delete(
         parsed_id = _uuid.UUID(cred_id)
     except ValueError:
         raise AppError("not_found", "not found") from None
+    from custos.audit import add_audit_row
+
     async with request.app.state.session_maker() as session:
         row = await session.get(PasskeyCredential, parsed_id)
         if row is None:
             raise AppError("not_found", "not found")
         await session.delete(row)
+        add_audit_row(
+            session, actor_kind="operator_session",
+            actor_id=str(sess.id), actor_label="operator", action="operator.passkey_change",
+            item_name=None, ok=True, detail={"reason": "remove"},
+        )
         await session.commit()
-    from custos.audit import record_audit
-
-    await record_audit(
-        request.app.state.session_maker, actor_kind="operator_session",
-        actor_id=str(sess.id), actor_label="operator", action="operator.passkey_change",
-        item_name=None, ok=True, detail={"reason": "remove"},
-    )
     return {"passkey": "removed"}
 
 
@@ -219,6 +219,14 @@ async def passkey_assert_verify(request: Request, response: Response) -> dict[st
         async with request.app.state.session_maker() as session:
             await passkeys.assertion_verify(session, settings, body)
             row, cookie = await create_session(session, purpose="full")
+            await session.flush()
+            from custos.audit import add_audit_row
+
+            add_audit_row(
+                session, actor_kind="operator_session",
+                actor_id=str(row.id), actor_label="operator", action="operator.login",
+                item_name=None, ok=True, detail={"reason": "passkey"},
+            )
             await session.commit()
     except AppError as exc:
         if exc.code == "unauthorized":
@@ -237,13 +245,6 @@ async def passkey_assert_verify(request: Request, response: Response) -> dict[st
                 counter=request.app.state.failure_counter,
             )
         raise
-    from custos.audit import record_audit
-
-    await record_audit(
-        request.app.state.session_maker, actor_kind="operator_session",
-        actor_id=str(row.id), actor_label="operator", action="operator.login",
-        item_name=None, ok=True, detail={"reason": "passkey"},
-    )
     set_session_cookie(response, cookie, settings)
     return {"csrf_token": row.csrf_token}
 
@@ -257,16 +258,16 @@ async def device_mint(request: Request) -> dict[str, Any]:
     ip, _peer = resolve_client(request, settings)
     request.app.state.rate_limiter.check_unauth(ip)
     ua = request.headers.get("user-agent", "")
+    from custos.audit import add_audit_row
+
     async with request.app.state.session_maker() as session:
         code, expires = await mint_device(session, ip=ip, user_agent=ua)
+        add_audit_row(
+            session, actor_kind="anonymous", actor_id=None,
+            actor_label="anonymous", action="device.login", item_name=None, ok=True,
+            detail={"stage": "mint"},
+        )
         await session.commit()
-    from custos.audit import record_audit
-
-    await record_audit(
-        request.app.state.session_maker, actor_kind="anonymous", actor_id=None,
-        actor_label="anonymous", action="device.login", item_name=None, ok=True,
-        detail={"stage": "mint"},
-    )
     return {"device_code": code, "expires_at": expires.isoformat()}
 
 
@@ -281,6 +282,8 @@ async def device_lookup(
     code = body.get("device_code")
     if not isinstance(code, str):
         raise AppError("invalid", "device_code is required")
+    from custos.audit import add_audit_row
+
     async with request.app.state.session_maker() as session:
         try:
             info = await lookup_device(session, code)
@@ -295,13 +298,12 @@ async def device_lookup(
                 counter=request.app.state.failure_counter,
             )
             raise
-    from custos.audit import record_audit
-
-    await record_audit(
-        request.app.state.session_maker, actor_kind="operator_session",
-        actor_id=str(sess.id), actor_label="operator", action="device.login",
-        item_name=None, ok=True, detail={"stage": "lookup"},
-    )
+        add_audit_row(
+            session, actor_kind="operator_session",
+            actor_id=str(sess.id), actor_label="operator", action="device.login",
+            item_name=None, ok=True, detail={"stage": "lookup"},
+        )
+        await session.commit()
     return info
 
 
@@ -316,7 +318,7 @@ async def device_approve(
     code = body.get("device_code")
     if not isinstance(code, str):
         raise AppError("invalid", "device_code is required")
-    from custos.audit import record_audit
+    from custos.audit import add_audit_row, record_audit
 
     async with request.app.state.session_maker() as session:
         try:
@@ -330,12 +332,12 @@ async def device_approve(
                 counter=request.app.state.failure_counter,
             )
             raise
+        add_audit_row(
+            session, actor_kind="operator_session",
+            actor_id=str(sess.id), actor_label="operator", action="device.login",
+            item_name=None, ok=True, detail={"stage": "approve"},
+        )
         await session.commit()
-    await record_audit(
-        request.app.state.session_maker, actor_kind="operator_session",
-        actor_id=str(sess.id), actor_label="operator", action="device.login",
-        item_name=None, ok=True, detail={"stage": "approve"},
-    )
     return {"transfer_code": transfer, "exchange_deadline": deadline.isoformat()}
 
 
@@ -359,7 +361,7 @@ async def device_exchange(request: Request, response: Response) -> dict[str, Any
         raise AppError("invalid", "inputs must be valid UTF-8") from None
     ip, _peer = resolve_client(request, settings)
     request.app.state.rate_limiter.check_unauth(ip)
-    from custos.audit import record_audit
+    from custos.audit import add_audit_row, record_audit
 
     async with request.app.state.session_maker() as session:
         try:
@@ -375,12 +377,13 @@ async def device_exchange(request: Request, response: Response) -> dict[str, Any
                 counter=request.app.state.failure_counter,
             )
             raise
+        await session.flush()
+        add_audit_row(
+            session, actor_kind="operator_session",
+            actor_id=str(sess_row.id), actor_label="operator", action="device.login",
+            item_name=None, ok=True, detail={"stage": "exchange"},
+        )
         await session.commit()
-    await record_audit(
-        request.app.state.session_maker, actor_kind="operator_session",
-        actor_id=str(sess_row.id), actor_label="operator", action="device.login",
-        item_name=None, ok=True, detail={"stage": "exchange"},
-    )
     set_session_cookie(response, cookie, settings)
     return {"csrf_token": sess_row.csrf_token}
 
@@ -429,14 +432,14 @@ async def step_up_route(
             executor=request.app.state.auth_executor,
             wait_cap=getattr(request.app.state, "auth_wait_cap", 10.0),
         )
-        await session.commit()
-    from custos.audit import record_audit
+        from custos.audit import add_audit_row
 
-    await record_audit(
-        request.app.state.session_maker, actor_kind="operator_session",
-        actor_id=str(sess.id), actor_label="operator", action="operator.step_up",
-        item_name=None, ok=True, detail={},
-    )
+        add_audit_row(
+            session, actor_kind="operator_session",
+            actor_id=str(sess.id), actor_label="operator", action="operator.step_up",
+            item_name=None, ok=True, detail={},
+        )
+        await session.commit()
     return {"step_up_token": token}
 
 
@@ -506,14 +509,17 @@ async def password_change_route(
                     counter=request.app.state.failure_counter,
                 )
             raise
+        await session.flush()
+        from custos.audit import add_audit_row
+
+        add_audit_row(
+            session, actor_kind="operator_session",
+            actor_id=str(promoted.id), actor_label="operator",
+            action="operator.password_change", item_name=None, ok=True, detail={},
+        )
         await session.commit()
     if cookie:
         set_session_cookie(response, cookie, settings)
-    await record_audit(
-        request.app.state.session_maker, actor_kind="operator_session",
-        actor_id=str(promoted.id), actor_label="operator",
-        action="operator.password_change", item_name=None, ok=True, detail={},
-    )
     result: dict[str, Any] = {"password": "changed"}
     if fresh_codes:
         result["recovery_codes"] = fresh_codes
@@ -527,19 +533,18 @@ async def password_change_route(
 async def recovery_regen(
     request: Request, sess: OperatorSession = _STEP_UP_RECOVERY
 ) -> dict[str, Any]:
+    from custos.audit import add_audit_row
     from custos.operator.recovery import issue_codes
 
     settings = request.app.state.settings
     async with request.app.state.session_maker() as session:
         codes = await issue_codes(session, settings.pepper_raw)
+        add_audit_row(
+            session, actor_kind="operator_session",
+            actor_id=str(sess.id), actor_label="operator",
+            action="operator.recovery_regen", item_name=None, ok=True, detail={},
+        )
         await session.commit()
-    from custos.audit import record_audit
-
-    await record_audit(
-        request.app.state.session_maker, actor_kind="operator_session",
-        actor_id=str(sess.id), actor_label="operator",
-        action="operator.recovery_regen", item_name=None, ok=True, detail={},
-    )
     return {"recovery_codes": codes}
 
 
@@ -551,8 +556,8 @@ async def totp_setup(
 
     async with request.app.state.session_maker() as session:
         secret, uri = await begin_totp_setup(session, request.app.state.vault)
+        _totp_audit(session, sess, "enable")
         await session.commit()
-    await _totp_audit(request, sess, "enable")
     return {"secret": secret, "provisioning_uri": uri}
 
 
@@ -571,8 +576,8 @@ async def totp_confirm(
         codes = await confirm_totp(
             session, request.app.state.vault, code, request.app.state.settings.pepper_raw
         )
+        _totp_audit(session, sess, "confirm")
         await session.commit()
-    await _totp_audit(request, sess, "confirm")
     return {"totp": "enabled", "recovery_codes": codes}
 
 
@@ -584,8 +589,8 @@ async def totp_disable(
 
     async with request.app.state.session_maker() as session:
         await disable_totp(session)
+        _totp_audit(session, sess, "disable")
         await session.commit()
-    await _totp_audit(request, sess, "disable")
     return {"totp": "disabled"}
 
 
@@ -656,14 +661,15 @@ async def login_route(request: Request, response: Response) -> dict[str, Any]:
             ip=ip, peer_ip=peer, budget=request.app.state.ledger_budget,
             counter=request.app.state.failure_counter,
         )
-        await session.commit()
-    from custos.audit import record_audit
+        await session.flush()
+        from custos.audit import add_audit_row
 
-    await record_audit(
-        request.app.state.session_maker, actor_kind="operator_session",
-        actor_id=str(row.id), actor_label=username, action="operator.login",
-        item_name=None, ok=True, detail={},
-    )
+        add_audit_row(
+            session, actor_kind="operator_session",
+            actor_id=str(row.id), actor_label=username, action="operator.login",
+            item_name=None, ok=True, detail={},
+        )
+        await session.commit()
     set_session_cookie(response, cookie, settings)
     return {"csrf_token": row.csrf_token}
 
@@ -727,19 +733,19 @@ async def setup(request: Request) -> dict[str, Any]:
             executor=request.app.state.auth_executor,
             wait_cap=getattr(request.app.state, "auth_wait_cap", 10.0),
         )
+        from custos.audit import add_audit_row
+
+        add_audit_row(
+            session, actor_kind="anonymous", actor_id=None,
+            actor_label="anonymous", action="operator.setup", item_name=None,
+            ok=True, detail={},
+        )
         await session.commit()
-    # durable now: consume the code and record success
+    # durable now: consume the code (a failed commit above leaves it usable)
     request.app.state.setup_code = None
     from pathlib import Path
-
-    from custos.audit import record_audit
 
     code_path = Path(settings.data_dir) / "setup-code"
     if code_path.exists():
         code_path.unlink()
-    await record_audit(
-        request.app.state.session_maker, actor_kind="anonymous", actor_id=None,
-        actor_label="anonymous", action="operator.setup", item_name=None,
-        ok=True, detail={},
-    )
     return {"setup": "complete"}

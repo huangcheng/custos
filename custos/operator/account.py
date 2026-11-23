@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -52,17 +53,51 @@ def validate_password(password: str) -> None:
 
 
 def _read_code_file(path: Path) -> str:
+    """Same contract as config._secret_file: regular file, no symlink,
+    nonblocking, mode 0600/0400 — the bootstrap credential must never come
+    from a loose-mode or planted file (§5/§12)."""
     from custos.config import ConfigError
 
     try:
-        code = path.read_text(encoding="utf-8").strip()
-    except UnicodeDecodeError as exc:
-        raise ConfigError("setup-code file is not valid UTF-8") from exc
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        reason = exc.strerror or type(exc).__name__
+        raise ConfigError(f"setup-code file cannot be opened: {reason}") from exc
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ConfigError("setup-code path is not a regular file")
+        if stat.S_IMODE(st.st_mode) not in (0o600, 0o400):
+            raise ConfigError("setup-code file must be mode 0600 or 0400")
+        try:
+            with os.fdopen(fd, encoding="utf-8") as handle:
+                fd = -1
+                code = handle.read()
+        except UnicodeDecodeError as exc:
+            raise ConfigError("setup-code file is not valid UTF-8") from exc
+        except OSError as exc:
+            raise ConfigError("setup-code file cannot be read") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    code = code.strip()
     if len(code) < 22:
         # empty/short file (crash between create and write, stray mount):
         # fail closed — an empty compare_digest match must never gate setup
         raise ConfigError("setup-code file is empty or too short; remove it to regenerate")
     return code
+
+
+def _refuse_loose_data_dir(data_dir: Path) -> None:
+    """A group/other-writable data dir lets a local user plant or replace the
+    setup-code file; refuse reuse instead of trusting whatever it contains."""
+    from custos.config import ConfigError
+
+    if stat.S_IMODE(data_dir.stat().st_mode) & 0o022:
+        raise ConfigError(
+            "data directory is group/other-writable; tighten it to 0700 "
+            "before the setup-code file can be trusted"
+        )
 
 
 def ensure_setup_code(settings: Settings) -> str:
@@ -71,8 +106,12 @@ def ensure_setup_code(settings: Settings) -> str:
         return settings.setup_code
     path = Path(settings.data_dir) / "setup-code"
     if path.exists():
+        _refuse_loose_data_dir(Path(settings.data_dir))
         return _read_code_file(path)
     Path(settings.data_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
+    # mkdir(exist_ok=True) leaves a pre-existing dir's mode untouched — refuse
+    # a plantable data dir on the provisioning path too, before linking a code
+    _refuse_loose_data_dir(Path(settings.data_dir))
     code = secrets.token_urlsafe(24)  # >=128-bit
     # atomic publish: random temp file + link — readers never observe a
     # half-written code; a failed write leaks nothing (finally unlinks)
@@ -83,6 +122,7 @@ def ensure_setup_code(settings: Settings) -> str:
             handle.write(code + "\n")
         os.link(tmp, path)  # atomic; fails if a rival published first
     except FileExistsError:
+        _refuse_loose_data_dir(Path(settings.data_dir))
         return _read_code_file(path)
     finally:
         tmp.unlink(missing_ok=True)
@@ -157,5 +197,6 @@ async def setup_account(
         await session.flush()
     except IntegrityError:
         raise AppError("setup_complete", "setup already completed") from None
-    # success audit + code consumption happen AFTER the route commits —
-    # a failed commit must leave the code usable for a retry
+    # the success audit commits WITH the account row (route's transaction);
+    # code consumption happens AFTER the route commits — a failed commit
+    # must leave the code usable for a retry

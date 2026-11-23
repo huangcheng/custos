@@ -60,6 +60,16 @@ async def create_session(
     return row, cookie
 
 
+def session_is_live(row: OperatorSession, now: datetime) -> bool:
+    """The single liveness predicate (revoked → absolute → idle when set);
+    shared by resolve_session and the rekey run interlock so they never drift."""
+    if row.revoked_at is not None or row.absolute_expires_at <= now:
+        return False
+    if row.idle_ttl_seconds > 0:
+        return row.last_seen_at + timedelta(seconds=row.idle_ttl_seconds) > now
+    return True
+
+
 async def resolve_session(session: AsyncSession, cookie: str) -> OperatorSession:
     row = (
         await session.execute(
@@ -67,13 +77,9 @@ async def resolve_session(session: AsyncSession, cookie: str) -> OperatorSession
         )
     ).scalar_one_or_none()
     now = datetime.now(UTC)
-    if row is None or row.revoked_at is not None:
-        raise AppError("unauthorized", "authentication failed")
-    if row.absolute_expires_at <= now:
+    if row is None or not session_is_live(row, now):
         raise AppError("unauthorized", "authentication failed")
     if row.idle_ttl_seconds > 0:
-        if row.last_seen_at + timedelta(seconds=row.idle_ttl_seconds) <= now:
-            raise AppError("unauthorized", "authentication failed")
         row.last_seen_at = now  # recovery_reset (idle 0) never refreshes
     return row
 

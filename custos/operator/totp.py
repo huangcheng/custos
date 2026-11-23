@@ -80,6 +80,11 @@ async def disable_totp(session: AsyncSession) -> None:
 async def verify_totp(session: AsyncSession, vault: Vault, code: str, *, site: str) -> bool:
     if site not in _SITE_COLUMNS:
         raise ValueError(f"unknown totp site {site!r}")
+    # invalid codes must fail uniformly (False -> 401 with normal accounting),
+    # never raise: hmac.compare_digest rejects non-ASCII str with TypeError,
+    # which would escape the uniform-failure path as a 500 password oracle
+    if not code.isascii() or not code.isdigit():
+        return False
     acct = (
         await session.execute(select(OperatorAccount).where(OperatorAccount.id == 1))
     ).scalar_one()
