@@ -30,10 +30,7 @@ def setup(pg_db: str):
         token, draft = mint_agent_key(settings.pepper_raw)
         async with maker() as session:
             session.add(
-                AgentKey(
-                    key_id=draft.key_id, digest=draft.digest, label="cu-test",
-                    mode="read", scopes=["*"],
-                )
+                AgentKey(key_id=draft.key_id, digest=draft.digest, label="cu-test")
             )
             await session.commit()
         async with app.router.lifespan_context(app):

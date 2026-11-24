@@ -50,7 +50,7 @@ async def _mint_key(client, h, csrf: str, label: str) -> dict:
     su = await h["step_up"](client, csrf)
     r = await client.post(
         "/api/admin/keys", headers=hdr(csrf, su),
-        json={"label": label, "mode": "read", "scopes": []},
+        json={"label": label},
     )
     assert r.status_code == 201, r.text
     return r.json()
@@ -131,9 +131,13 @@ async def test_reveal_revoked_and_legacy_refused(admin_stack) -> None:
         su = await h["step_up"](client, csrf)
         r = await client.delete(f"/api/admin/keys/{key_id}", headers=hdr(csrf, su))
         assert r.status_code == 204
+        # hard delete (rev 38): the row is gone — reveal is a plain 404 and
+        # the inventory no longer lists the key
         su = await h["step_up"](client, csrf)
         r = await client.get(f"/api/admin/keys/{key_id}/reveal", headers=hdr(csrf, su))
-        assert r.status_code == 409
+        assert r.status_code == 404
+        listing = await client.get("/api/admin/keys", headers=hdr(csrf))
+        assert all(k["key_id"] != key_id for k in listing.json()["keys"])
         # legacy digest-only token (direct insert, no sealed copy) -> 409
         legacy = await h["mint_co"](allow_sensitive=True)
         legacy_id = legacy.split(".")[0].removeprefix("co-")
@@ -192,7 +196,6 @@ async def test_rekey_reseals_key_and_token_secrets(admin_stack) -> None:
         blob, ver = vault_k1.seal("key", draft.key_id, token.encode())
         async with maker() as s:
             s.add(AgentKey(key_id=draft.key_id, digest=draft.digest, label="cu-test-old",
-                           mode="read", scopes=[],
                            secret_ciphertext=blob, secret_key_version=ver))
             await s.commit()
         csrf = await h["login"](client)

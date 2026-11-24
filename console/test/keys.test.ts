@@ -7,7 +7,6 @@ import {
   expiryLabel,
   mintKeyBody,
   revealBlocker,
-  scopeSummary,
   tokenExpiryBody,
 } from "../src/keys.ts";
 
@@ -32,49 +31,32 @@ test("expiryLabel keeps revoked/expired/date/never distinct", () => {
 });
 
 test("credentialAbout is one formatter for mint and reveal queue identity", () => {
-  assert.equal(
-    credentialAbout({ label: "l", mode: "read", key_id: "abcdef012345" }),
-    "l · read · abcdef012345",
-  );
   assert.equal(credentialAbout({ label: "l", key_id: "abcdef012345" }), "l · abcdef012345");
 });
 
-test("mintKeyBody splits scopes and omits blank expiry", () => {
-  const body = mintKeyBody({
-    label: "cu-test-agent",
-    mode: "read-write",
-    scopes: "aliyun  stock-*,db-*",
-    expiresAt: "",
-  });
-  assert.deepEqual(body, {
-    label: "cu-test-agent",
-    mode: "read-write",
-    scopes: ["aliyun", "stock-*", "db-*"],
-  });
+test("mintKeyBody carries only label (+ optional expiry): full-authority keys", () => {
+  const body = mintKeyBody({ label: "cu-test-agent", expiresAt: "" });
+  assert.deepEqual(body, { label: "cu-test-agent" });
 });
 
-test("mintKeyBody accepts an empty scope list as no access", () => {
-  const body = mintKeyBody({ label: "x", mode: "read", scopes: "  ", expiresAt: "" });
-  assert.deepEqual(body.scopes, []);
+test("mintKeyBody never emits mode or scopes (rev 38)", () => {
+  const body = mintKeyBody({ label: "x", expiresAt: "" });
+  assert.equal("mode" in body, false);
+  assert.equal("scopes" in body, false);
 });
 
 test("mintKeyBody rejects a blank label", () => {
-  assert.throws(() => mintKeyBody({ label: " ", mode: "read", scopes: "*", expiresAt: "" }), KeyFormError);
+  assert.throws(() => mintKeyBody({ label: " ", expiresAt: "" }), KeyFormError);
 });
 
 test("mintKeyBody normalizes an expiry to ISO", () => {
-  const body = mintKeyBody({
-    label: "x",
-    mode: "read",
-    scopes: "*",
-    expiresAt: "2027-01-01T00:00:00Z",
-  });
+  const body = mintKeyBody({ label: "x", expiresAt: "2027-01-01T00:00:00Z" });
   assert.equal(body.expires_at, "2027-01-01T00:00:00.000Z");
 });
 
 test("mintKeyBody rejects a past expiry", () => {
   assert.throws(
-    () => mintKeyBody({ label: "x", mode: "read", scopes: "*", expiresAt: "2020-01-01T00:00:00Z" }),
+    () => mintKeyBody({ label: "x", expiresAt: "2020-01-01T00:00:00Z" }),
     KeyFormError,
   );
 });
@@ -111,10 +93,4 @@ test("auditQuery only includes non-empty filters", () => {
   );
   const withCursor = auditQuery({ action: "key.mint", limit: 100, cursor: "c1" });
   assert.equal(withCursor, "action=key.mint&limit=100&cursor=c1");
-});
-
-test("scopeSummary handles wildcard, empty, and lists", () => {
-  assert.equal(scopeSummary({ scopes: ["*"] }), "*");
-  assert.equal(scopeSummary({ scopes: [] }), "no access");
-  assert.equal(scopeSummary({ scopes: ["a", "b-*"] }), "a, b-*");
 });

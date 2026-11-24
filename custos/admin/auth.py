@@ -1,7 +1,7 @@
 """Admin dual-auth + authority matrix (design §5/§6, plan 3).
 
-AdminPrincipal satisfies the item-engine Principal protocol with full
-access (mode read-write, scopes ("*",)). Gates:
+AdminPrincipal satisfies the item-engine Principal protocol; every admin
+principal has full item-plane authority (rev 38). Gates:
 - require_admin: cookie XOR co- bearer (both → 401); 300/min per principal.
 - require_session_only: tokens → 403 session_required BEFORE any state
   check (audited auth.failure); sessions consume a single step-up.
@@ -37,8 +37,6 @@ class AdminPrincipal:
     row_id: uuid.UUID
     key_id: str | None = None
     allow_sensitive: bool = False
-    mode: str = "read-write"
-    scopes: tuple[str, ...] = ("*",)
 
     @property
     def plane(self) -> str:

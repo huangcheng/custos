@@ -229,7 +229,6 @@ async def test_admin_principal_satisfies_engine_protocol(admin_stack) -> None:
         co = await h["mint_co"](allow_sensitive=True)
         p = await require_admin(_fake_request(h["app"], bearer(co)))
         assert isinstance(p, AdminPrincipal)
-        assert p.mode == "read-write" and p.scopes == ("*",)
         assert p.actor_kind == "operator_token" and len(p.actor_id) == 12
         assert p.plane == p.key_id
         await client.get("/api/admin/ping", headers=bearer(co))

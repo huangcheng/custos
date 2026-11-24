@@ -38,10 +38,7 @@ async def test_verify_ok(maker) -> None:
     token, draft = mint_agent_key(FAKE_PEPPER)
     async with maker() as session:
         session.add(
-            AgentKey(
-                key_id=draft.key_id, digest=draft.digest, label="cu-test",
-                mode="read", scopes=["*"],
-            )
+            AgentKey(key_id=draft.key_id, digest=draft.digest, label="cu-test")
         )
         await session.commit()
     async with maker() as session:
@@ -53,11 +50,7 @@ async def test_all_failures_identical(maker) -> None:
     token, draft = mint_agent_key(FAKE_PEPPER)
     async with maker() as session:
         session.add(
-            AgentKey(
-                key_id=draft.key_id, digest=draft.digest, label="cu-test",
-                mode="read", scopes=["*"],
-                revoked_at=datetime.now(UTC) - timedelta(seconds=1),
-            )
+            AgentKey(key_id=draft.key_id, digest=draft.digest, label="cu-test")
         )
         await session.commit()
     expired_token, expired_draft = mint_agent_key(FAKE_PEPPER)
@@ -65,7 +58,6 @@ async def test_all_failures_identical(maker) -> None:
         session.add(
             AgentKey(
                 key_id=expired_draft.key_id, digest=expired_draft.digest, label="cu-test",
-                mode="read", scopes=["*"],
                 expires_at=datetime.now(UTC) - timedelta(seconds=1),
             )
         )
@@ -73,7 +65,7 @@ async def test_all_failures_identical(maker) -> None:
     unknown_token, _ = mint_agent_key(FAKE_PEPPER)
     wrong_secret = token[:-2] + ("aa" if not token.endswith("aa") else "bb")
     messages = []
-    for presented in (unknown_token, wrong_secret, token, expired_token, "garbage"):
+    for presented in (unknown_token, wrong_secret, expired_token, "garbage"):
         async with maker() as session:
             with pytest.raises(AgentAuthError) as exc_info:
                 await verify_agent_key(session, FAKE_PEPPER, presented)

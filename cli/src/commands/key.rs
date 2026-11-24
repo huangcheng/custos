@@ -8,21 +8,16 @@ use crate::CliError;
 
 #[derive(Subcommand)]
 pub enum KeyCommand {
-    /// Mint an agent key (session + step-up).
+    /// Mint an agent key (session + step-up). Every key has full access.
     Mint {
         #[arg(long)]
         label: String,
-        #[arg(long, value_parser = ["read", "read-write"])]
-        mode: String,
-        /// Repeatable scope pattern, e.g. --scope 'stock-*'.
-        #[arg(long = "scope")]
-        scopes: Vec<String>,
         #[arg(long)]
         expires: Option<String>,
     },
     /// List keys.
     Ls,
-    /// Revoke a key (session + step-up).
+    /// Revoke a key (session + step-up; the key is deleted).
     Revoke { key_id: String },
     /// Re-reveal a minted key's full token (session + step-up).
     Reveal { key_id: String },
@@ -30,14 +25,9 @@ pub enum KeyCommand {
 
 pub async fn run(client: &Client, cmd: KeyCommand, as_json: bool) -> Result<(), CliError> {
     match cmd {
-        KeyCommand::Mint {
-            label,
-            mode,
-            scopes,
-            expires,
-        } => {
+        KeyCommand::Mint { label, expires } => {
             let token = prompt_step_up(client).await?;
-            let mut body = json!({ "label": label, "mode": mode, "scopes": scopes });
+            let mut body = json!({ "label": label });
             if let Some(expires) = expires {
                 body["expires_at"] = Value::String(expires);
             }
@@ -75,14 +65,10 @@ pub async fn run(client: &Client, cmd: KeyCommand, as_json: bool) -> Result<(), 
             if let Some(keys) = out.get("keys").and_then(Value::as_array) {
                 for key in keys {
                     println!(
-                        "{}\t{}\t{}\t{}",
+                        "{}\t{}\t{}",
                         key.get("key_id").and_then(Value::as_str).unwrap_or("?"),
                         key.get("label").and_then(Value::as_str).unwrap_or("?"),
-                        key.get("mode").and_then(Value::as_str).unwrap_or("?"),
-                        key.get("revoked_at")
-                            .and_then(Value::as_str)
-                            .map(|_| "revoked")
-                            .unwrap_or("active"),
+                        key.get("expires_at").and_then(Value::as_str).unwrap_or("never"),
                     );
                 }
             }

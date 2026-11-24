@@ -1,7 +1,7 @@
 """Item write engine contract (design §4/§6) against real postgres."""
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import pytest
 from sqlalchemy import select
@@ -27,8 +27,6 @@ pytestmark = pytest.mark.usefixtures("pg_db")
 class Principal:
     actor_id: str = "abcdef012345"
     actor_label: str = "cu-test"
-    mode: str = "read-write"
-    scopes: list[str] = field(default_factory=lambda: ["*"])
     actor_kind: str = "agent"
 
 
@@ -63,29 +61,6 @@ async def test_create_and_get(env) -> None:
         got = await get_item(s, maker, vault, p, "engine-aliyun")
         assert got["fields"][0]["value"] == "sk-fake"
         assert got["revision"] == item["revision"]
-
-
-async def test_out_of_scope_identical_404(env) -> None:
-    maker, vault, p = env
-    p.scopes = ["other-*"]
-    async with maker() as s:
-        with pytest.raises(AppError) as e1:
-            await get_item(s, maker, vault, p, "missing-item")
-        await create_item(s, maker, vault, Principal(), body("scoped-item"))
-        await s.commit()
-    async with maker() as s:
-        with pytest.raises(AppError) as e2:
-            await get_item(s, maker, vault, p, "scoped-item")
-    assert (e1.value.code, e1.value.message) == (e2.value.code, e2.value.message)
-
-
-async def test_read_only_write_403(env) -> None:
-    maker, vault, p = env
-    p.mode = "read"
-    async with maker() as s:
-        with pytest.raises(AppError) as e:
-            await create_item(s, maker, vault, p, body("ro-item"))
-        assert e.value.code == "read_only"
 
 
 async def test_put_history_and_keep_placeholder(env) -> None:
@@ -259,11 +234,6 @@ async def test_soft_delete_matrix(env) -> None:
             await put_item(s, maker, vault, p, "del-item", body(), upsert=True)
         assert e.value.code == "conflict"
         await s.rollback()
-    ro = Principal(mode="read")
-    async with maker() as s:
-        with pytest.raises(AppError) as e:
-            await put_item(s, maker, vault, ro, "del-item", body())
-        assert e.value.code == "read_only"  # mode before existence
 
 
 async def test_retype_pair_history_oracle(env) -> None:
@@ -481,20 +451,6 @@ async def test_keep_plain_noop_response_has_value(env) -> None:
         assert entry.get("value") == "pv" and "kept" not in entry
 
 
-async def test_create_gates_before_body_validation(env) -> None:
-    maker, vault, p = env
-    p.scopes = ["other-*"]
-    async with maker() as s:
-        with pytest.raises(AppError) as e:
-            await create_item(s, maker, vault, p, {"name": "some-item", "fields": "not-a-list"})
-        assert e.value.code == "not_found"  # scope gate first, not 422
-    ro = Principal(mode="read")
-    async with maker() as s:
-        with pytest.raises(AppError) as e:
-            await create_item(s, maker, vault, ro, {"name": "valid-name", "fields": "bad"})
-        assert e.value.code == "read_only"
-
-
 async def test_force_drop_bumps_revision(env) -> None:
     maker, vault, p = env
     async with maker() as s:
@@ -530,15 +486,6 @@ async def test_force_drop_rejects_token_principal(env) -> None:
         assert e.value.code == "session_required"
 
 
-async def test_read_only_nameless_post_gets_403(env) -> None:
-    maker, vault, p = env
-    ro = Principal(mode="read")
-    async with maker() as s:
-        with pytest.raises(AppError) as e:
-            await create_item(s, maker, vault, ro, {"fields": []})
-        assert e.value.code == "read_only"
-
-
 async def test_giant_if_match_is_422(env) -> None:
     maker, vault, p = env
     async with maker() as s:
@@ -572,16 +519,6 @@ async def test_operator_principal_write_audited_with_session_kind(env) -> None:
             .all()
         )
         assert rows and all(r.actor_kind == "operator_session" for r in rows)
-
-
-async def test_out_of_scope_readonly_create_gets_404(env) -> None:
-    maker, vault, p = env
-    p.mode = "read"
-    p.scopes = ["other-*"]
-    async with maker() as s:
-        with pytest.raises(AppError) as e:
-            await create_item(s, maker, vault, p, body("scoped-ro"))
-        assert e.value.code == "not_found"  # scope BEFORE mode (§6)
 
 
 async def test_failed_write_leaves_no_success_audit(env) -> None:

@@ -63,10 +63,7 @@ export type HistorySnapshot = {
 export type KeyRow = {
   key_id: string;
   label: string;
-  mode: "read" | "read-write";
-  scopes: string[];
   expires_at: string | null;
-  revoked_at?: string | null;
   created_at?: string;
   has_secret?: boolean;
 };

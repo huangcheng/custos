@@ -1,8 +1,9 @@
 """Agent-plane REST routes (design §6). Thin: parse → engine → shape → audit.
 
-All access goes through the engine's check order (scope → mode → existence);
-out-of-scope is byte-identical to missing. List/search are metadata-only,
-exclude soft-deleted items, and paginate with opaque cursors (50/100).
+Every authenticated key has full item-plane authority (rev 38: no scope or
+mode checks — every key reads and writes every item). List/search are
+metadata-only, exclude soft-deleted items, and paginate with opaque
+cursors (50/100).
 """
 
 from __future__ import annotations
@@ -29,7 +30,6 @@ from custos.items import (
 )
 from custos.keys import AgentPrincipal
 from custos.limits import FieldView
-from custos.scopes import scope_allows
 
 router = APIRouter(prefix="/api")
 
@@ -75,8 +75,9 @@ def _page_limit(raw: str | None) -> int:
 
 async def _audit_denial(request: Request, key: AgentPrincipal, action: str, name: Any,
                         exc: AppError) -> None:
-    # out-of-scope probes and mode denials are visible in the ledger (§5);
-    # shares the global failure budget; called AFTER the handler session closes.
+    # denial audits (missing/deleted items, conflicts) are visible in the
+    # ledger (§5); shares the global failure budget; called AFTER the handler
+    # session closes.
     from custos.limits import valid_item_name
 
     normalized = valid_item_name(name)
@@ -152,35 +153,12 @@ async def list_via_engine(
                     Item.id.in_(plain_names),
                 )
             )
-        # scope-filter BEFORE the page cut. The scan advances past the last
-        # VISIBLE row only — out-of-scope rows are re-scanned next page, so a
-        # short page never silently drops in-scope items behind them.
-        visible: list[tuple[Any, str]] = []
-        has_more = False
-        scan_exhausted = False
-        offset_name = cursor_payload.get("after")
-        last_visible: str | None = None
-        for _ in range(20):
-            batch_stmt = stmt.limit(limit * 4)
-            if offset_name is not None:
-                batch_stmt = batch_stmt.where(Item.name > offset_name)
-            batch = list((await session.execute(batch_stmt)).all())
-            if not batch:
-                scan_exhausted = True
-                break
-            for row_id, row_name in batch:
-                if scope_allows(key.scopes, row_name):
-                    if len(visible) == limit:
-                        has_more = True
-                        break
-                    visible.append((row_id, row_name))
-                    last_visible = row_name
-            if has_more:
-                break
-            if len(batch) < limit * 4:
-                scan_exhausted = True
-                break
-            offset_name = batch[-1][1]
+        # every key sees every item (rev 38 full-access model): a plain
+        # keyset page, no scope filtering or scan budget
+        rows = list((await session.execute(stmt.limit(limit + 1))).all())
+        has_more = len(rows) > limit
+        visible: list[tuple[Any, str]] = [(row_id, row_name) for row_id, row_name in rows[:limit]]
+        last_visible: str | None = visible[-1][1] if visible else None
         items_by_id: dict[Any, Item] = {}
         fields_by_item: dict[Any, list[tuple[str, bool]]] = {}
         if visible:
@@ -204,10 +182,6 @@ async def list_via_engine(
     next_cursor = None
     if has_more and last_visible is not None:
         next_cursor = mint_cursor({"after": last_visible}, pepper, endpoint, binding)
-    elif not scan_exhausted and offset_name is not None:
-        # scan budget hit with nothing visible: resume from the scan edge so
-        # the caller can always make progress through out-of-scope stretches
-        next_cursor = mint_cursor({"after": offset_name}, pepper, endpoint, binding)
     result = {
         "items": [
             _list_row(items_by_id[i[0]], fields_by_item.get(i[0], []), include_deleted)

@@ -11,8 +11,9 @@ to read, and every access is audited.
 - **Items** are named records with typed fields (`secret` fields are encrypted
   at rest, `plain` fields are metadata). Items support soft-delete, restore,
   overwrite history, and a field-level `secret` policy.
-- **Agent keys** (`cu-…`) carry a mode (`read` or `read-write`) and fnmatch
-  scopes. An out-of-scope name is indistinguishable from a missing one.
+- **Agent keys** (`cu-…`) are full-authority: every key reads and writes every
+  item (no modes or scopes, sibling-gateway parity). Revocation deletes the key
+  outright — a deleted key is simply unknown.
 - **Operator tokens** (`co-…`) are for the CLI: bounded-lifetime, revocable,
   and optionally allowed to perform sensitive reads.
 - **The admin plane** adds reveal, history, key/token management, rekey,

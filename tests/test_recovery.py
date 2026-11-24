@@ -386,11 +386,9 @@ async def test_agent_keys_survive_a_password_change(maker) -> None:
     from custos.operator.sessions import create_session
 
     async with maker() as s:
-        # two agent keys, one already revoked, plus the operator's own session
-        s.add(AgentKey(key_id="aaaaaaaaaaaa", digest=bytes(32), label="live-agent",
-                       mode="read", scopes=["*"]))
-        s.add(AgentKey(key_id="bbbbbbbbbbbb", digest=bytes(32), label="dead-agent",
-                       mode="read", scopes=["*"]))
+        # two agent keys, plus the operator's own session
+        s.add(AgentKey(key_id="aaaaaaaaaaaa", digest=bytes(32), label="live-agent"))
+        s.add(AgentKey(key_id="bbbbbbbbbbbb", digest=bytes(32), label="other-agent"))
         row_full, _ = await create_session(s)
         await s.commit()
         full_id = row_full.id
@@ -406,7 +404,6 @@ async def test_agent_keys_survive_a_password_change(maker) -> None:
         keys = (await s.execute(select(AgentKey))).scalars().all()
         assert len(keys) == 2, "no agent key was deleted"
         live = next(k for k in keys if k.key_id == "aaaaaaaaaaaa")
-        assert live.revoked_at is None, "a password change must not revoke agent keys"
         # the row survives with its digest intact (still verifiable)
         assert live.digest == bytes(32)
 

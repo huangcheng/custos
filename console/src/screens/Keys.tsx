@@ -9,15 +9,12 @@ import {
   expiryLabel,
   mintKeyBody,
   revealBlocker,
-  scopeSummary,
   type KeyForm,
 } from "../keys";
 import { truncate } from "../plain";
 import type { KeyRow, MintedKey } from "../types";
 
-// Fail closed: an empty scope list grants nothing. A wildcard default on a
-// credential vault is the wrong failure mode (§5: empty scopes = no access).
-const BLANK: KeyForm = { label: "", mode: "read", scopes: "", expiresAt: "" };
+const BLANK: KeyForm = { label: "", expiresAt: "" };
 
 export function Keys({ onSignOut }: { onSignOut: () => void }) {
   const [rows, setRows] = useState<KeyRow[]>([]);
@@ -27,6 +24,7 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
   const [busy, setBusy] = useState(false);
   const [totpRequired, setTotpRequired] = useState(false);
   const [pending, setPending] = useState<null | ((token: string) => Promise<void>)>(null);
+  const [confirm, setConfirm] = useState<null | { title: string; message: string }>(null);
   const oneTime = useOneTime();
 
   const load = useCallback(async () => {
@@ -53,6 +51,7 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
 
   const mint = () => {
     setError("");
+    setConfirm(null);
     try {
       const body = mintKeyBody(form);
       setPending(() => async (token: string) => {
@@ -81,6 +80,12 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
   };
 
   const revoke = (keyId: string) => {
+    setConfirm({
+      title: "Delete key",
+      message:
+        "This permanently destroys the key and its sealed secret. Any agent using it " +
+        "loses access immediately, and the only way back is to mint a new key.",
+    });
     setPending(() => async (token: string) => {
       await api("DELETE", `/api/admin/keys/${keyId}`, undefined, { stepUpToken: token });
       await load();
@@ -88,6 +93,7 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
   };
 
   const reveal = (row: KeyRow) => {
+    setConfirm(null);
     setError("");
     setPending(() => async (token: string) => {
       setBusy(true);
@@ -119,30 +125,11 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
         <h2 className="page-sub" style={{ margin: 0 }}>
           Mint a key
         </h2>
-        <div className="row">
-          <TextField
-            label="Label"
-            value={form.label}
-            onChange={(next) => setForm((prev) => ({ ...prev, label: next }))}
-          />
-          <label>
-            <span>Mode</span>
-            <select
-              value={form.mode}
-              onChange={(event) =>
-                setForm((prev) => ({ ...prev, mode: event.target.value as KeyForm["mode"] }))
-              }
-            >
-              <option value="read">read</option>
-              <option value="read-write">read-write</option>
-            </select>
-          </label>
-        </div>
         <TextField
-          label="Scopes"
-          value={form.scopes}
-          onChange={(next) => setForm((prev) => ({ ...prev, scopes: next }))}
-          hint="Space or comma separated patterns, e.g. aliyun stock-* — '*' for everything; empty grants nothing"
+          label="Label"
+          value={form.label}
+          onChange={(next) => setForm((prev) => ({ ...prev, label: next }))}
+          hint="Every key can read and modify all items — mint sparingly and set an expiry."
         />
         <TextField
           label="Expires (optional)"
@@ -163,8 +150,6 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
               <tr>
                 <th>Label</th>
                 <th>Key ID</th>
-                <th>Mode</th>
-                <th>Scopes</th>
                 <th>Expires</th>
                 <th />
               </tr>
@@ -176,34 +161,24 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
                 <tr key={row.key_id}>
                   <td title={row.label}>{truncate(row.label, 28)}</td>
                   <td className="mono">{row.key_id}</td>
-                  <td>
-                    <span className={`pill ${row.mode === "read-write" ? "accent" : ""}`}>
-                      {row.mode}
-                    </span>
-                  </td>
-                  <td className="mono">{scopeSummary(row)}</td>
                   <td className="mono muted" title={row.expires_at ?? undefined}>
                     {expiryLabel(row)}
                   </td>
                   <td>
-                    {row.revoked_at ? null : (
-                      <>
-                        {/* the span carries the tooltip: disabled buttons get no pointer events */}
-                        <span title={blocker}>
-                          <Button
-                            label="Reveal"
-                            onClick={() => reveal(row)}
-                            disabled={busy || blocker !== undefined}
-                          />
-                        </span>{" "}
-                        <Button
-                          label="Revoke"
-                          variant="danger"
-                          onClick={() => revoke(row.key_id)}
-                          disabled={busy}
-                        />
-                      </>
-                    )}
+                    {/* the span carries the tooltip: disabled buttons get no pointer events */}
+                    <span title={blocker}>
+                      <Button
+                        label="Reveal"
+                        onClick={() => reveal(row)}
+                        disabled={busy || blocker !== undefined}
+                      />
+                    </span>{" "}
+                    <Button
+                      label="Delete"
+                      variant="danger"
+                      onClick={() => revoke(row.key_id)}
+                      disabled={busy}
+                    />
                   </td>
                 </tr>
                 );
@@ -215,7 +190,12 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
       {pending ? (
         <ConfirmStepUp
           totpRequired={totpRequired}
-          onCancel={() => setPending(null)}
+          title={confirm?.title}
+          message={confirm?.message}
+          onCancel={() => {
+            setPending(null);
+            setConfirm(null);
+          }}
           onToken={async (token) => {
             const run = pending;
             setPending(null);

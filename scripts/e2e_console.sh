@@ -413,7 +413,7 @@ const MATCH = await page.evaluate(async ({ item, value }) => {
 }, { item: ITEM, value: SECRET_VALUE });
 ok(MATCH.ok, `If-Match rejects a stale revision (${MATCH.why})`);
 
-// 7. key mint: step-up gated, and the token is shown exactly once
+// 7. key mint: step-up gated; full-authority model (rev 38: label only)
 await page.goto(`${BASE}/keys`);
 await until(
   () => page.evaluate(() => document.body.textContent.includes("Mint a key")),
@@ -423,10 +423,7 @@ await page.evaluate(() => {
   const label = [...document.querySelectorAll("input")].find(
     (i) => i.placeholder === "" && i.closest("label")?.textContent.startsWith("Label"),
   );
-  const scopes = [...document.querySelectorAll("input")].find(
-    (i) => i.closest("label")?.textContent.startsWith("Scopes"),
-  );
-  if (!label || !scopes) throw new Error("key form inputs not found");
+  if (!label) throw new Error("key form label input not found");
   const set = (el, v) => {
     const setter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype, "value").set;
@@ -434,7 +431,6 @@ await page.evaluate(() => {
     el.dispatchEvent(new Event("input", { bubbles: true }));
   };
   set(label, "cu-test-console-key");
-  set(scopes, "*");
   [...document.querySelectorAll("button")].find((b) => /Mint key/i.test(b.textContent)).click();
 });
 await until(() => page.evaluate(() => !!document.querySelector(".scrim form")), "the mint step-up prompt");

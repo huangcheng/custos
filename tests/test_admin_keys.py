@@ -26,8 +26,7 @@ async def test_key_mint_once_and_agent_auth(admin_stack) -> None:
         su = await h["step_up"](client, csrf)
         r = await client.post("/api/admin/keys",
                               headers={"x-csrf-token": csrf, "x-step-up-token": su},
-                              json={"label": "cu-test-agent", "mode": "read-write",
-                                    "scopes": ["*"]})
+                              json={"label": "cu-test-agent"})
         assert r.status_code == 201, r.text
         minted = r.json()
         token = minted["token"]
@@ -42,7 +41,7 @@ async def test_key_mint_once_and_agent_auth(admin_stack) -> None:
         assert r.status_code == 200
         assert token not in r.text and token.split(".")[1] not in r.text
         row = r.json()["keys"][0]
-        assert row["key_id"] == minted["key_id"] and row["mode"] == "read-write"
+        assert row["key_id"] == minted["key_id"]
         async with maker() as s:
             rows = (await s.execute(select(AuditRow).where(
                 AuditRow.action == "key.mint"))).scalars().all()
@@ -56,7 +55,7 @@ async def test_mint_revoke_session_only(admin_stack) -> None:
         for sensitive in (False, True):
             co = await h["mint_co"](allow_sensitive=sensitive)
             r = await client.post("/api/admin/keys", headers=bearer(co),
-                                  json={"label": "x", "mode": "read", "scopes": []})
+                                  json={"label": "x"})
             assert r.status_code == 403 and r.json()["code"] == "session_required"
             r = await client.post("/api/admin/tokens", headers=bearer(co),
                                   json={"label": "x", "expires_at": _iso(1)})
@@ -69,15 +68,15 @@ async def test_mint_revoke_session_only(admin_stack) -> None:
         csrf = await h["login"](client)
         hdr = {"x-csrf-token": csrf}
         r = await client.post("/api/admin/keys", headers=hdr,
-                              json={"label": "x", "mode": "read", "scopes": []})
+                              json={"label": "x"})
         assert r.status_code == 401
         su = await h["step_up"](client, csrf)
         hdr_su = {**hdr, "x-step-up-token": su}
         r = await client.post("/api/admin/keys", headers=hdr_su,
-                              json={"label": "x", "mode": "read", "scopes": []})
+                              json={"label": "x"})
         assert r.status_code == 201
         r = await client.post("/api/admin/keys", headers=hdr_su,
-                              json={"label": "y", "mode": "read", "scopes": []})
+                              json={"label": "y"})
         assert r.status_code == 401  # consumed exactly once
 
 
@@ -87,7 +86,7 @@ async def test_revoke_bites_next_request(admin_stack) -> None:
         su = await h["step_up"](client, csrf)
         r = await client.post("/api/admin/keys",
                               headers={"x-csrf-token": csrf, "x-step-up-token": su},
-                              json={"label": "r", "mode": "read", "scopes": ["*"]})
+                              json={"label": "r"})
         token, key_id = r.json()["token"], r.json()["key_id"]
         client.cookies.clear()
         assert (await client.get("/api/items", headers=bearer(token))).status_code == 200

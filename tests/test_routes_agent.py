@@ -28,24 +28,23 @@ def stack(pg_db: str):
         engine = create_async_engine(pg_db)
         maker = async_sessionmaker(engine, expire_on_commit=False)
 
-        async def mint(mode: str, scopes: list[str]) -> str:
+        async def mint() -> tuple[str, str]:
             token, draft = mint_agent_key(settings.pepper_raw)
             async with maker() as s:
-                s.add(AgentKey(key_id=draft.key_id, digest=draft.digest, label="cu-test",
-                               mode=mode, scopes=scopes))
+                s.add(AgentKey(key_id=draft.key_id, digest=draft.digest, label="cu-test"))
                 await s.commit()
-            return token
+            return token, draft.key_id
 
-        rw = await mint("read-write", ["*"])
-        ro = await mint("read", ["*"])
-        scoped = await mint("read-write", ["stock-*"])
+        rw, rw_id = await mint()
+        second, second_id = await mint()
         async with app.router.lifespan_context(app):
             client = httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             )
             async with client:
                 try:
-                    yield client, maker, {"rw": rw, "ro": ro, "scoped": scoped}
+                    yield client, maker, {"rw": rw, "ro": second, "scoped": second,
+                                          "rw_id": rw_id, "second_id": second_id}
                 finally:
                     await engine.dispose()
 
@@ -77,28 +76,6 @@ async def test_create_get_roundtrip(stack) -> None:
         assert got.status_code == 200
         values = {f["name"]: f["value"] for f in got.json()["fields"]}
         assert values["KEY"] == "sk-fake-http"
-
-
-async def test_scope_404_byte_identical(stack) -> None:
-    async with stack() as (client, maker, tokens):
-        a = await client.get("/api/items/stock-exists", headers=auth(tokens["scoped"]))
-        await client.post("/api/items", headers=auth(tokens["rw"]), json=item_body("other-item"))
-        b = await client.get("/api/items/other-item", headers=auth(tokens["scoped"]))
-        c = await client.get("/api/items/never-existed", headers=auth(tokens["scoped"]))
-        assert a.status_code == b.status_code == c.status_code == 404
-        assert a.content == b.content == c.content
-        # out-of-scope write also 404 (not 403)
-        w = await client.put("/api/items/other-item", headers=auth(tokens["scoped"]),
-                             json=item_body())
-        assert w.status_code == 404
-
-
-async def test_read_only_write_403(stack) -> None:
-    async with stack() as (client, maker, tokens):
-        resp = await client.post("/api/items", headers=auth(tokens["ro"]),
-                                 json=item_body("ro-http"))
-        assert resp.status_code == 403
-        assert resp.json()["code"] == "read_only"
 
 
 async def test_etag_if_match_flow(stack) -> None:
@@ -248,20 +225,6 @@ async def test_oversize_body_413(stack) -> None:
         assert r.status_code == 413
 
 
-async def test_out_of_scope_read_audited(stack) -> None:
-    async with stack() as (client, maker, tokens):
-        await client.post("/api/items", headers=auth(tokens["rw"]), json=item_body("probe-item"))
-        r = await client.get("/api/items/probe-item", headers=auth(tokens["scoped"]))
-        assert r.status_code == 404
-        async with maker() as s:
-            rows = (
-                (await s.execute(select(AuditRow).where(
-                    AuditRow.item_name == "probe-item", AuditRow.ok.is_(False))))
-                .scalars().all()
-            )
-            assert rows  # probing is visible
-
-
 async def test_search_like_wildcards_literal(stack) -> None:
     async with stack() as (client, maker, tokens):
         await client.post("/api/items", headers=auth(tokens["rw"]),
@@ -284,40 +247,6 @@ async def test_huge_name_probe_404_and_audited(stack) -> None:
                 .scalars().all()
             )
             assert any(len(r.item_name or "") <= 200 and r.action == "get" for r in rows)
-
-
-async def test_cursor_never_leaks_out_of_scope_names(stack) -> None:
-    import base64
-
-    async with stack() as (client, maker, tokens):
-        # >4000 out-of-scope items (20 batches x 200): scan budget exhausts with
-        # nothing visible; the resume cursor must be opaque and still progress.
-        # Bulk seed via ORM — the HTTP path would (correctly) rate-limit at 120/min.
-        from custos.db.models import Item
-
-        async with maker() as s:
-            s.add_all([Item(name=f"aaa-hidden-{i:04d}", notes="") for i in range(4100)])
-            await s.commit()
-        await client.post("/api/items", headers=auth(tokens["rw"]),
-                          json=item_body("stock-visible"))
-        r = await client.get("/api/items?limit=50", headers=auth(tokens["scoped"]))
-        body = r.json()
-        assert body["next_cursor"] is not None
-        raw = body["next_cursor"].split(".")[0]
-        decoded = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
-        assert b"aaa-hidden" not in decoded  # opaque: no out-of-scope names
-        # and pagination still progresses to the visible item
-        seen = set()
-        cursor = body["next_cursor"]
-        for _ in range(10):
-            page = await client.get(f"/api/items?limit=50&cursor={cursor}",
-                                    headers=auth(tokens["scoped"]))
-            pb = page.json()
-            seen.update(i["name"] for i in pb["items"])
-            if pb["next_cursor"] is None:
-                break
-            cursor = pb["next_cursor"]
-        assert "stock-visible" in seen
 
 
 async def test_key_unavailable_read_audited(stack) -> None:

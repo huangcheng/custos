@@ -163,22 +163,24 @@ step_up() {
     -d '{"password":"cu-test-e2e-password"}' \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["step_up_token"])'
 }
-mint_key() { # label mode scopes-json
+mint_key() { # label
   local su; su=$(step_up)
   curl -fsS -m 10 -b "$RUN_DIR/cookies" -X POST "$BASE/api/admin/keys" \
     -H "x-csrf-token: $CSRF" -H "x-step-up-token: $su" -H 'content-type: application/json' \
-    -d "{\"label\":\"$1\",\"mode\":\"$2\",\"scopes\":$3}"
+    -d "{\"label\":\"$1\"}"
 }
-RW_JSON=$(mint_key e2e-rw read-write '["*"]') || fail "mint rw"
-RO_JSON=$(mint_key e2e-ro read '["*"]') || fail "mint ro"
-SC_JSON=$(mint_key e2e-scoped read-write '["stock-*"]') || fail "mint scoped"
-python3 - "$RUN_DIR/tokens.json" "$RW_JSON" "$RO_JSON" "$SC_JSON" <<'PYEOF'
+# rev 38: every key has full access — no mode/scopes anywhere. The three keys
+# are identical; the distinct names only let assertions prove cross-key reach.
+KEY1_JSON=$(mint_key e2e-first) || fail "mint first"
+KEY2_JSON=$(mint_key e2e-second) || fail "mint second"
+KEY3_JSON=$(mint_key e2e-third) || fail "mint third"
+python3 - "$RUN_DIR/tokens.json" "$KEY1_JSON" "$KEY2_JSON" "$KEY3_JSON" <<'PYEOF'
 import json, sys
-path, rw, ro, sc = sys.argv[1:5]
-rw, ro, sc = json.loads(rw), json.loads(ro), json.loads(sc)
+path, first, second, third = sys.argv[1:5]
+first, second, third = json.loads(first), json.loads(second), json.loads(third)
 with open(path, "w") as f:
-    json.dump({"rw": rw["token"], "ro": ro["token"], "scoped": sc["token"],
-               "rw_key_id": rw["key_id"]}, f)
+    json.dump({"first": first["token"], "second": second["token"],
+               "third": third["token"], "first_key_id": first["key_id"]}, f)
 PYEOF
 # session-only gate: an operator token can never mint keys (403 before state)
 SU=$(step_up)
@@ -188,7 +190,7 @@ CO_JSON=$(curl -fsS -m 10 -b "$RUN_DIR/cookies" -X POST "$BASE/api/admin/tokens"
 CO=$(printf '%s' "$CO_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
 S=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$BASE/api/admin/keys" \
   -H "Authorization: Bearer $CO" -H 'content-type: application/json' \
-  -d '{"label":"x","mode":"read","scopes":[]}')
+  -d '{"label":"x"}')
 [ "$S" = "403" ] || fail "token mint must 403 session_required, got $S"
 # masked admin get + audit read via the operator token
 MASKED=$(curl -fsS -m 10 "$BASE/api/admin/items" -H "Authorization: Bearer $CO")
@@ -200,10 +202,10 @@ d = json.load(sys.stdin)
 minted = {x["detail"].get("key_id") for x in d["items"]}
 expected = {json.loads(a)["key_id"] for a in sys.argv[1:4]}
 assert expected <= minted, (expected, minted)
-' "$RW_JSON" "$RO_JSON" "$SC_JSON" || fail "key.mint audit rows"
+' "$KEY1_JSON" "$KEY2_JSON" "$KEY3_JSON" || fail "key.mint audit rows"
 
 echo "== revealable credentials (rev 37)"
-RW_KEY_ID_EARLY=$(printf '%s' "$RW_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["key_id"])')
+RW_KEY_ID_EARLY=$(printf '%s' "$KEY1_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["key_id"])')
 # assert both the status AND the closed error code of an explicit capture
 assert_err() { # $1 = "<body>\n<status>", $2 = expected status, $3 = expected code
   printf '%s' "$1" | python3 -c '
@@ -228,7 +230,7 @@ d = json.load(sys.stdin)
 minted = json.loads(sys.argv[1])
 assert d["token"] == minted["token"], "revealed token differs from minted"
 assert d["key_id"] == minted["key_id"]
-' "$RW_JSON" || fail "key reveal round-trip"
+' "$KEY1_JSON" || fail "key reveal round-trip"
 # the reveal is audited (allow_sensitive token reads the audit)
 RAUDIT=$(curl -fsS -m 10 "$BASE/api/admin/audit?action=key.reveal" -H "Authorization: Bearer $CO")
 printf '%s' "$RAUDIT" | python3 -c '
@@ -269,9 +271,9 @@ import httpx
 
 base, tokens_path = sys.argv[1], sys.argv[2]
 tokens = json.load(open(tokens_path))
-rw = {"Authorization": f"Bearer {tokens['rw']}"}
-ro = {"Authorization": f"Bearer {tokens['ro']}"}
-scoped = {"Authorization": f"Bearer {tokens['scoped']}"}
+first = {"Authorization": f"Bearer {tokens['first']}"}
+second = {"Authorization": f"Bearer {tokens['second']}"}
+third = {"Authorization": f"Bearer {tokens['third']}"}
 c = httpx.Client(base_url=base, timeout=15)
 
 def check(cond, msg):
@@ -313,41 +315,43 @@ def admin_step_up():
             "x-step-up-token": r.json()["step_up_token"]}
 
 # create as read-write agent over REST
-r = c.post("/api/items", headers=rw, json={"name": "e2e-item", "notes": "n", "fields": [
+r = c.post("/api/items", headers=first, json={"name": "e2e-item", "notes": "n", "fields": [
     {"name": "API_KEY", "secret": True, "value": "cu-test.e2e-secret"},
     {"name": "URL", "secret": False, "value": "https://example.invalid"},
 ]})
 check(r.status_code == 201, "create 201")
 etag = r.headers["etag"]
-ok = c.put("/api/items/e2e-item", headers={**rw, "If-Match": etag},
+ok = c.put("/api/items/e2e-item", headers={**first, "If-Match": etag},
            json={"notes": "n", "fields": [
                {"name": "API_KEY", "secret": True, "value": "cu-test.e2e-secret"},
                {"name": "URL", "secret": False, "value": "https://example.invalid"}]})
 check(ok.status_code == 200 and ok.headers["etag"] == '"2"', "if-match positive")
 
-# out-of-scope read AND write -> 404 identical to missing
-a = c.get("/api/items/e2e-item", headers=scoped)
-b = c.get("/api/items/never-existed", headers=rw)  # genuine missing-item baseline
-w = c.put("/api/items/e2e-item", headers=scoped, json={"notes": "", "fields": []})
-m = c.put("/api/items/never-existed", headers=rw, json={"notes": "", "fields": []})
-check(a.status_code == b.status_code == w.status_code == m.status_code == 404, "scope 404s")
-check(a.content == b.content == w.content == m.content, "byte-identical 404 bodies")
+# every key has full access (rev 38): a second key reads AND writes the
+# first key's item; a genuinely missing item still 404s
+a = c.get("/api/items/e2e-item", headers=third)
+check(a.status_code == 200, "any key reads any item")
+w = c.put("/api/items/e2e-item", headers=third,
+          json={"notes": "cross-key", "fields": []})
+check(w.status_code == 200, "any key writes any item")
+m = c.get("/api/items/never-existed", headers=first)
+check(m.status_code == 404, "missing item still 404")
 
-# read-only write -> 403
-r = c.post("/api/items", headers=ro, json={"name": "e2e-ro", "fields": []})
-check(r.status_code == 403 and r.json()["code"] == "read_only", "read-only 403")
+# a fresh key can create too (no read-only class exists any more)
+r = c.post("/api/items", headers=second, json={"name": "e2e-ro", "fields": []})
+check(r.status_code == 201, "any key creates items")
 
 # If-Match conflict
-r = c.put("/api/items/e2e-item", headers={**rw, "If-Match": '"99"'},
+r = c.put("/api/items/e2e-item", headers={**first, "If-Match": '"99"'},
           json={"notes": "", "fields": []})
 check(r.status_code == 409, "if-match 409")
 
 # hostile env value round-trips through eval without execution
 hostile = "'; touch /tmp/custos-e2e-pwn; echo '"
-r = c.patch("/api/items/e2e-item", headers=rw, json={"fields": [
+r = c.patch("/api/items/e2e-item", headers=first, json={"fields": [
     {"name": "HOSTILE", "secret": True, "value": hostile}]})
 check(r.status_code == 200, "patch hostile")
-env_resp = c.get("/api/items/e2e-item/env", headers=rw)
+env_resp = c.get("/api/items/e2e-item/env", headers=first)
 check(env_resp.status_code == 200, "env 200")
 env_out = env_resp.text
 with tempfile.TemporaryDirectory() as td:
@@ -358,14 +362,14 @@ with tempfile.TemporaryDirectory() as td:
     check(not os.path.exists(marker), "no execution")
 
 # soft-delete hides; upsert on deleted -> 409
-r = c.delete("/api/items/e2e-item", headers=rw)
+r = c.delete("/api/items/e2e-item", headers=first)
 check(r.status_code == 204, "delete 204")
-check(c.get("/api/items/e2e-item", headers=rw).status_code == 404, "deleted hidden")
-r = c.put("/api/items/e2e-item?upsert=1", headers=rw, json={"notes": "", "fields": []})
+check(c.get("/api/items/e2e-item", headers=first).status_code == 404, "deleted hidden")
+r = c.put("/api/items/e2e-item?upsert=1", headers=first, json={"notes": "", "fields": []})
 check(r.status_code == 409, "upsert-on-deleted 409")
 
 # caps: 413 on oversize value
-r = c.post("/api/items", headers=rw, json={"name": "e2e-big", "fields": [
+r = c.post("/api/items", headers=first, json={"name": "e2e-big", "fields": [
     {"name": "K", "secret": False, "value": "x" * (16 * 1024 + 1)}]})
 check(r.status_code == 413, "value cap 413")
 
@@ -378,25 +382,25 @@ check(r1.status_code == r2.status_code == 401 and r1.content == r2.content, "uni
 
 # restore recovers a soft-deleted item for agents (the containment reversal).
 # Create + delete first so the restore has something to act on.
-r = c.post("/api/items", headers=rw, json={"name": "e2e-restore", "notes": "", "fields": [
+r = c.post("/api/items", headers=first, json={"name": "e2e-restore", "notes": "", "fields": [
     {"name": "K", "secret": True, "value": "cu-test.restore-v1"}]})
 check(r.status_code == 201, "create for restore")
-check(c.delete("/api/items/e2e-restore", headers=rw).status_code == 204, "soft-delete for restore")
-check(c.get("/api/items/e2e-restore", headers=rw).status_code == 404, "deleted item hidden")
+check(c.delete("/api/items/e2e-restore", headers=first).status_code == 204, "soft-delete for restore")
+check(c.get("/api/items/e2e-restore", headers=first).status_code == 404, "deleted item hidden")
 r = c.post("/api/admin/items/e2e-restore/restore", headers=admin_step_up())
 check(r.status_code == 200, f"restore 200 (got {r.status_code}: {r.text[:120]})")
-r = c.get("/api/items/e2e-restore", headers=rw)
+r = c.get("/api/items/e2e-restore", headers=first)
 check(r.status_code == 200, "restored item visible to agents again")
 
 # history survives a field overwrite AND an item soft-delete
-c.post("/api/items", headers=rw, json={"name": "e2e-hist", "notes": "", "fields": [
+c.post("/api/items", headers=first, json={"name": "e2e-hist", "notes": "", "fields": [
     {"name": "K", "secret": True, "value": "cu-test.hist-v1"}]})
-c.put("/api/items/e2e-hist", headers=rw, json={"notes": "", "fields": [
+c.put("/api/items/e2e-hist", headers=first, json={"notes": "", "fields": [
     {"name": "K", "secret": True, "value": "cu-test.hist-v2"}]})
 hist = c.get("/api/admin/items/e2e-hist/history", headers=admin_headers())
 check(hist.status_code == 200 and len(hist.json()["items"]) >= 1, "history survives overwrite")
 check("cu-test.hist-v1" not in hist.text, "history metadata carries no value")
-c.delete("/api/items/e2e-hist", headers=rw)
+c.delete("/api/items/e2e-hist", headers=first)
 hist2 = c.get("/api/admin/items/e2e-hist/history", headers=admin_headers())
 check(hist2.status_code == 200 and len(hist2.json()["items"]) >= 1,
       "history survives the item soft-delete")
@@ -415,7 +419,7 @@ for label, body, want in [
     ("field count", {"name": "e2e-cap3", "fields": [
         {"name": f"F{i}", "secret": False, "value": "v"} for i in range(33)]}, 413),
 ]:
-    r = c.post("/api/items", headers=rw, json=body)
+    r = c.post("/api/items", headers=first, json=body)
     check(r.status_code == want, f"{label} -> {want}, got {r.status_code}")
 
 print("REST ASSERTIONS OK")
@@ -471,18 +475,14 @@ async def main():
         check("e2e-mcp" in str(listing.content), "mcp list")
         d = await client.call_tool("custos_delete_item", {"name": "e2e-mcp"})
         check(not d.is_error, "mcp delete")
-    await with_client(tokens["rw"], flow)
+    await with_client(tokens["first"], flow)
 
-    # read-only key sees write tools but gets read_only errors
-    async def ro_flow(client):
-        from mcp.shared.exceptions import MCPError
-        try:
-            await client.call_tool("custos_put_item",
-                                   {"name": "e2e-mcp-ro", "notes": "", "fields": []})
-            check(False, "read-only mcp write must fail")
-        except MCPError as e:
-            check("read_only" in str(e), "read_only error code")
-    await with_client(tokens["ro"], ro_flow)
+    # every key has full authority via MCP too (rev 38)
+    async def second_flow(client):
+        r = await client.call_tool("custos_put_item",
+                                   {"name": "e2e-mcp-second", "notes": "", "fields": []})
+        check(not r.is_error, "second key writes via MCP")
+    await with_client(tokens["second"], second_flow)
     print("MCP ASSERTIONS OK")
 
 anyio.run(main)
@@ -492,7 +492,7 @@ BEFORE_AUTHFAIL=$(docker exec "$PROJECT-db-1" psql -U custos -d custos -tAc \
   "SELECT count(*) FROM auth_events WHERE kind='agent_auth' AND NOT ok;")
 BEFORE_AUDITFAIL=$(docker exec "$PROJECT-db-1" psql -U custos -d custos -tAc \
   "SELECT count(*) FROM audit WHERE action='auth.failure' AND ok=false;")
-RW_KEY_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["rw_key_id"])' "$RUN_DIR/tokens.json")
+RW_KEY_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["first_key_id"])' "$RUN_DIR/tokens.json")
 SU=$(step_up)
 REV=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -b "$RUN_DIR/cookies" \
   -X DELETE "$BASE/api/admin/keys/$RW_KEY_ID" \
@@ -505,7 +505,7 @@ base, tokens_path = sys.argv[1], sys.argv[2]
 tokens = json.load(open(tokens_path))
 async def main():
     async with httpx2.AsyncClient(base_url=base,
-            headers={"Authorization": f"Bearer {tokens['rw']}"}) as http:
+            headers={"Authorization": f"Bearer {tokens['first']}"}) as http:
         r = await http.post("/mcp", json={"jsonrpc": "2.0", "id": 1,
                                           "method": "tools/list", "params": {}})
         if r.status_code != 401:

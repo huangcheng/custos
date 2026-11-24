@@ -24,11 +24,10 @@ def stack_factory(pg_db: str):
     one task for enter+exit)."""
     settings = load_settings(env(CUSTOS_DATABASE_URL=pg_db, CUSTOS_SKIP_MIGRATE="1"))
 
-    async def mint(maker, mode: str) -> tuple[str, str]:
+    async def mint(maker) -> tuple[str, str]:
         token, draft = mint_agent_key(settings.pepper_raw)
         async with maker() as s:
-            s.add(AgentKey(key_id=draft.key_id, digest=draft.digest, label="cu-test",
-                           mode=mode, scopes=["*"]))
+            s.add(AgentKey(key_id=draft.key_id, digest=draft.digest, label="cu-test"))
             await s.commit()
         return token, draft.key_id
 
@@ -37,8 +36,8 @@ def stack_factory(pg_db: str):
         app = create_app(settings)
         engine = create_async_engine(pg_db)
         maker = async_sessionmaker(engine, expire_on_commit=False)
-        rw, rw_id = await mint(maker, "read-write")
-        ro, _ = await mint(maker, "read")
+        rw, rw_id = await mint(maker)
+        ro, _ = await mint(maker)
         async with app.router.lifespan_context(app):
             try:
                 yield app, maker, {"rw": rw, "rw_id": rw_id, "ro": ro}
@@ -60,8 +59,9 @@ def _http(app, token: str | None):
 @asynccontextmanager
 async def _mcp_client(app, token: str | None):
     """One task owns the whole transport lifecycle (anyio cancel scopes)."""
-    from mcp import Client
     from mcp.client.streamable_http import streamable_http_client
+
+    from mcp import Client
 
     class _ASGITransportCM:
         async def __aenter__(self):
@@ -125,31 +125,20 @@ async def test_mcp_unauthenticated_401(stack_factory) -> None:
         assert resp.status_code == 401
 
 
-async def test_mcp_revoked_key_401_next_request(stack_factory) -> None:
-    from datetime import UTC, datetime
-
+async def test_mcp_deleted_key_401_next_request(stack_factory) -> None:
     async with stack_factory() as (app, maker, tokens), _mcp_client(app, tokens["rw"]) as client:
         await client.call_tool("custos_list_items", {})
         async with maker() as s:
             key = (
                 await s.execute(select(AgentKey).where(AgentKey.key_id == tokens["rw_id"]))
             ).scalar_one()
-            key.revoked_at = datetime.now(UTC)
+            # hard-delete revocation (rev 38): the key is unknown afterwards
+            await s.delete(key)
             await s.commit()
         from mcp.shared.exceptions import MCPError
 
         with pytest.raises((MCPError, httpx2.HTTPStatusError, anyio.ClosedResourceError)):
             await client.call_tool("custos_list_items", {})
-
-
-async def test_mcp_read_only_write_error(stack_factory) -> None:
-    async with stack_factory() as (app, maker, tokens), _mcp_client(app, tokens["ro"]) as client:
-        from mcp.shared.exceptions import MCPError
-
-        with pytest.raises(MCPError, match="read_only"):
-            await client.call_tool("custos_put_item", {
-                "name": "mcp-ro", "notes": "", "fields": [],
-            })
 
 
 async def test_mcp_denial_audited(stack_factory) -> None:

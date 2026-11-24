@@ -71,9 +71,9 @@ class _AgentTokenVerifier(TokenVerifier):
         return AccessToken(
             token=token,
             client_id=key.key_id,
-            scopes=list(key.scopes),
+            scopes=[],  # full-authority keys carry no scope list (rev 38)
             expires_at=int(key.expires_at.timestamp()) if key.expires_at else None,
-            claims={"label": key.label, "mode": key.mode},
+            claims={"label": key.label},
         )
 
 
@@ -210,8 +210,6 @@ def _principal() -> AgentPrincipal:
     return AgentPrincipal(
         actor_id=access.client_id,
         actor_label=str(access.claims.get("label", "")) if access.claims else "",
-        mode=str(access.claims.get("mode", "read")) if access.claims else "read",
-        scopes=tuple(access.scopes),
     )
 
 

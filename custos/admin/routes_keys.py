@@ -34,8 +34,6 @@ from custos.routes_agent import _json_body
 
 router = APIRouter(prefix="/api/admin")
 
-_MODES = ("read", "read-write")
-
 
 def _invalid(message: str) -> AppError:
     return AppError("invalid", message)
@@ -77,13 +75,12 @@ async def mint_key(
     request: Request, p: AdminPrincipal = Depends(require_session_only)
 ) -> dict[str, Any]:
     body = await _json_body(request)
+    # a caller that still sends the removed access-model fields must be told,
+    # not silently handed a FULL-authority key (privilege upgrade by omission)
+    for removed in ("mode", "scopes"):
+        if removed in body:
+            raise _invalid(f"{removed} is no longer supported (keys are full-authority)")
     label = _label(body)
-    mode = body.get("mode")
-    if mode not in _MODES:
-        raise _invalid("mode must be read or read-write")
-    scopes = body.get("scopes")
-    if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
-        raise _invalid("scopes must be a list of strings")
     expires_at = _parse_expiry(body.get("expires_at"))
     if expires_at is not None and expires_at <= datetime.now(UTC):
         raise _invalid("expires_at must be in the future")
@@ -91,7 +88,7 @@ async def mint_key(
     blob, version = request.app.state.vault.seal("key", draft.key_id, token.encode())
     async with request.app.state.session_maker() as session:
         row = AgentKey(key_id=draft.key_id, digest=draft.digest, label=label,
-                       mode=mode, scopes=scopes, expires_at=expires_at,
+                       expires_at=expires_at,
                        secret_ciphertext=blob, secret_key_version=version)
         session.add(row)
         await session.flush()
@@ -100,7 +97,7 @@ async def mint_key(
         created_at = row.created_at
     return {
         "token": token,  # shown at mint; re-revealable via /keys/{key_id}/reveal
-        "key_id": draft.key_id, "label": label, "mode": mode, "scopes": scopes,
+        "key_id": draft.key_id, "label": label,
         "expires_at": expires_at.isoformat() if expires_at else None,
         "created_at": created_at.isoformat(),
     }
@@ -115,9 +112,8 @@ async def list_keys(
             select(AgentKey).order_by(AgentKey.created_at))).scalars())
     keys = [
         {
-            "key_id": r.key_id, "label": r.label, "mode": r.mode, "scopes": r.scopes,
+            "key_id": r.key_id, "label": r.label,
             "expires_at": r.expires_at.isoformat() if r.expires_at else None,
-            "revoked_at": r.revoked_at.isoformat() if r.revoked_at else None,
             "created_at": r.created_at.isoformat(),
             "has_secret": r.secret_ciphertext is not None,
         }
@@ -136,14 +132,17 @@ async def revoke_key(
     key_id: str, request: Request,
     p: AdminPrincipal = Depends(require_session_only),
 ) -> Response:
+    """Revocation is a hard delete (rev 38, Janus parity): the row is gone, so
+    the key is unknown on the auth path and absent from the inventory. The
+    `key.revoke` audit row keeps the id (the closed detail set admits no free
+    text, so the label is not retained), keeping the action attributable."""
     async with request.app.state.session_maker() as session:
         row = (await session.execute(
             select(AgentKey).where(AgentKey.key_id == key_id).with_for_update()
         )).scalar_one_or_none()
         if row is None:
             raise AppError("not_found", "not found")
-        if row.revoked_at is None:
-            row.revoked_at = datetime.now(UTC)
+        await session.delete(row)
         _audit_in_txn(session, p, "key.revoke", {"key_id": key_id})
         await session.commit()
     return Response(status_code=204)
@@ -267,7 +266,9 @@ async def _reveal_credential(
         exc = AppError("not_found", "not found")
         await _fail(exc)
         raise exc
-    if row.revoked_at is not None:
+    # revoked_at exists only on operator tokens (agent-key revocation deletes
+    # the row, so a deleted key is a plain 404 above)
+    if getattr(row, "revoked_at", None) is not None:
         exc = AppError("conflict", "credential is revoked")
         await _fail(exc)
         raise exc

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -34,7 +33,6 @@ from custos.limits import (
     plan_put_ops,
     validate_post_body,
 )
-from custos.scopes import scope_allows
 
 HISTORY_BUDGET = 20
 HISTORY_CEILING = 100_000
@@ -66,26 +64,12 @@ class Principal(Protocol):
     @property
     def actor_label(self) -> str: ...
     @property
-    def mode(self) -> str: ...
-    @property
-    def scopes(self) -> Sequence[str]: ...
-    @property
     def actor_kind(self) -> str: ...
     # "agent" | "operator_session" | "operator_token" | "local_process"
 
 
 def _not_found() -> AppError:
     return AppError("not_found", "not found")
-
-
-def _check_scope(p: Principal, name: str) -> None:
-    if not scope_allows(p.scopes, name):
-        raise _not_found()
-
-
-def _check_write_mode(p: Principal) -> None:
-    if p.mode != "read-write":
-        raise AppError("read_only", "key is read-only")
 
 
 async def _lock_item(session: AsyncSession, name: str) -> Item | None:
@@ -338,10 +322,6 @@ async def create_item(
     body: dict[str, Any],
     mask: bool = False,
 ) -> dict[str, Any]:
-    raw_name = body.get("name")
-    if isinstance(raw_name, str):
-        _check_scope(p, raw_name)  # scope BEFORE mode (§6 check order)
-    _check_write_mode(p)
     name, notes, views = validate_post_body(body)
     existing = await _lock_item(session, name)
     if existing is not None:
@@ -378,7 +358,6 @@ async def get_item(
     name: str,
     include_deleted: bool = False,
 ) -> dict[str, Any]:
-    _check_scope(p, name)
     item = (
         await session.execute(select(Item).where(Item.name == name))
     ).scalar_one_or_none()
@@ -409,8 +388,6 @@ async def put_item(
     mask: bool = False,
     allow_downgrade: bool = False,
 ) -> dict[str, Any]:
-    _check_scope(p, name)
-    _check_write_mode(p)
     item = await _lock_item(session, name)
     if item is None:
         if not upsert:
@@ -459,8 +436,6 @@ async def patch_item(
     mask: bool = False,
     allow_downgrade: bool = False,
 ) -> dict[str, Any]:
-    _check_scope(p, name)
-    _check_write_mode(p)
     item = await _lock_item(session, name)
     if item is None or item.deleted_at is not None:
         raise _not_found()
@@ -505,8 +480,6 @@ async def soft_delete(
     p: Principal,
     name: str,
 ) -> None:
-    _check_scope(p, name)
-    _check_write_mode(p)
     item = await _lock_item(session, name)
     if item is None or item.deleted_at is not None:
         raise _not_found()

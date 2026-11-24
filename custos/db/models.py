@@ -22,7 +22,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TIMESTAMP
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 ITEM_NAME_RE = r"^[a-z0-9][a-z0-9._-]{0,199}$"
@@ -114,7 +114,6 @@ class FieldHistory(Base):
 class AgentKey(Base):
     __tablename__ = "agent_keys"
     __table_args__ = (
-        CheckConstraint("mode IN ('read', 'read-write')", name="ck_agent_keys_mode"),
         CheckConstraint(
             "(secret_ciphertext IS NULL) = (secret_key_version IS NULL)",
             name="ck_agent_keys_secret_xor",
@@ -130,10 +129,9 @@ class AgentKey(Base):
     secret_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
     secret_key_version: Mapped[int | None] = mapped_column(Integer)
     label: Mapped[str] = mapped_column(Text, nullable=False)
-    mode: Mapped[str] = mapped_column(Text, nullable=False)
-    scopes: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
+    # Every key has full item-plane authority (rev 38, Janus/Portunus parity):
+    # no mode, no scopes. Revocation hard-deletes the row (no revoked_at).
     expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
-    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     created_at: Mapped[datetime] = _created_at()
 
 

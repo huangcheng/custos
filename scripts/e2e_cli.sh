@@ -184,7 +184,7 @@ check "a value containing CR round-trips byte-for-byte" \
 KEY_MINT_LOG="$RUN_DIR/key-mint.log"
 if ! printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" \
       "$PROJECT-app-1" custos --url http://127.0.0.1:8300 \
-      key mint --label cli-e2e-key --mode read --scope '*' \
+      key mint --label cli-e2e-key \
       > "$KEY_MINT_LOG" 2> "$RUN_DIR/key-mint.err"; then
   cat "$KEY_MINT_LOG" "$RUN_DIR/key-mint.err" >&2
   fail "key mint exited non-zero"
@@ -228,14 +228,14 @@ docker exec "$PROJECT-db-1" psql -U custos -d custos -c \
   "UPDATE agent_keys SET secret_ciphertext = NULL, secret_key_version = NULL WHERE key_id = '$KEY_ID'" >/dev/null
 printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" custos --url http://127.0.0.1:8300 key revoke "$KEY_ID" > "$RUN_DIR/revoke.log" 2>&1 \
   || { cat "$RUN_DIR/revoke.log" >&2; fail "key revoke"; }
-check "a revoked token 401s on the next request" \
+check "a revoked (deleted) key 401s on the next request" \
   '[ "$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $KEY" "$BASE/api/items")" = "401" ]'
 if printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
   custos --url http://127.0.0.1:8300 key reveal "$KEY_ID" > "$RUN_DIR/key-reveal-revoked.log" 2> "$RUN_DIR/key-reveal-revoked.err"; then
-  fail "reveal of a revoked key must fail"
+  fail "reveal of a deleted key must fail"
 fi
-check "revoked refusal is the revoked conflict" \
-  'grep -q "conflict: credential is revoked" "$RUN_DIR/key-reveal-revoked.err"'
+check "deleted-key refusal is a plain not-found (row is gone)" \
+  'grep -q "not_found: not found" "$RUN_DIR/key-reveal-revoked.err"'
 
 echo "== session-only routes refuse an env token"
 S=$(printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
@@ -253,7 +253,7 @@ check "token reveal returns the exact minted token" \
 # An env token satisfies token-permitted reads but must be REFUSED (before any
 # request) on a session-only route such as minting.
 docker exec -e CUSTOS_OPERATOR_TOKEN="$S" "$PROJECT-app-1" \
-  custos --url http://127.0.0.1:8300 key mint --label nope --mode read --scope '*' \
+  custos --url http://127.0.0.1:8300 key mint --label nope \
   > "$RUN_DIR/token-mint.log" 2>&1 && fail "an env token minted a key"
 check "an env token cannot mint a key (refused, not 403'd by the server)" \
   'grep -q "interactive session" "$RUN_DIR/token-mint.log"'

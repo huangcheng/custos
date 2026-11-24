@@ -1,9 +1,8 @@
-// Key-mint form ⇄ API body (§6). Kept React-free for unit tests.
+// Key-mint form ⇄ API body (§6, rev 38). Kept React-free for unit tests.
+// Every key has full item-plane authority: no mode, no scopes.
 
 export type KeyForm = {
   label: string;
-  mode: "read" | "read-write";
-  scopes: string;
   expiresAt: string;
 };
 
@@ -22,24 +21,10 @@ export function mintKeyBody(form: KeyForm): Record<string, unknown> {
   const label = form.label.trim();
   if (label.length === 0) throw new KeyFormError("label is required");
   if (label.length > 200) throw new KeyFormError("label must be 200 characters or fewer");
-  const scopes = form.scopes
-    .split(/[\s,]+/)
-    .map((scope) => scope.trim())
-    .filter((scope) => scope.length > 0);
-  const body: Record<string, unknown> = {
-    label,
-    mode: form.mode,
-    scopes, // empty array means "no access" (fail closed, §5)
-  };
+  const body: Record<string, unknown> = { label };
   const expires = form.expiresAt.trim();
   if (expires) body.expires_at = futureIso(expires, "expiry");
   return body;
-}
-
-export function scopeSummary(key: { scopes: string[] }): string {
-  if (key.scopes.length === 0) return "no access";
-  if (key.scopes.includes("*")) return "*";
-  return key.scopes.join(", ");
 }
 
 // Shared credential-row display logic (Keys + Settings tokens): one source
@@ -47,8 +32,8 @@ export function scopeSummary(key: { scopes: string[] }): string {
 export const isExpired = (expiresAt: string | null | undefined): boolean =>
   typeof expiresAt === "string" && new Date(expiresAt).getTime() <= Date.now();
 
-export function credentialAbout(c: { label: string; key_id: string; mode?: string }): string {
-  return c.mode ? `${c.label} · ${c.mode} · ${c.key_id}` : `${c.label} · ${c.key_id}`;
+export function credentialAbout(c: { label: string; key_id: string }): string {
+  return `${c.label} · ${c.key_id}`;
 }
 
 export function revealBlocker(row: {

@@ -1,10 +1,12 @@
-"""Agent keys (design §5): ``cu-<12 hex key_id>.<43 base64url secret>``.
+"""Agent keys (design §5, rev 38): ``cu-<12 hex key_id>.<43 base64url secret>``.
 
-Authentication keeps only HMAC-SHA256(pepper, presented secret text) as the
-stored digest. Verification runs exactly one constant-time digest comparison
-on every path — unknown key_id / revoked / expired compare against a fixed
+Every key carries full item-plane authority (Janus/Portunus parity): no mode,
+no scopes. Authentication keeps only HMAC-SHA256(pepper, presented secret
+text) as the stored digest. Verification runs exactly one constant-time
+digest comparison on every path — unknown / expired compare against a fixed
 dummy digest so all failures do equal digest work (DB-lookup timing residual
-accepted, §5). Mint ALSO seals the full token under the keyring (AAD domain
+accepted, §5). Revocation hard-deletes the row, so a deleted key is simply
+unknown. Mint ALSO seals the full token under the keyring (AAD domain
 ``key:<key_id>|<version>``) so the operator can re-reveal it through the
 session+step-up-only admin reveal route; the draft itself never carries the secret.
 """
@@ -30,13 +32,11 @@ _FAILURE_MESSAGE = "authentication failed"
 
 @dataclass(frozen=True, eq=False)
 class AgentPrincipal:
-    """The authenticated agent principal (Principal protocol): identity and
-    authorization only — never the digest or secret."""
+    """The authenticated agent principal (Principal protocol): identity only —
+    never the digest or secret. Full item-plane authority by design."""
 
     actor_id: str
     actor_label: str
-    mode: str
-    scopes: tuple[str, ...]
     actor_kind: str = "agent"
 
     @property
@@ -45,9 +45,7 @@ class AgentPrincipal:
 
 
 def as_principal(row: AgentKey) -> AgentPrincipal:
-    return AgentPrincipal(
-        actor_id=row.key_id, actor_label=row.label, mode=row.mode, scopes=tuple(row.scopes)
-    )
+    return AgentPrincipal(actor_id=row.key_id, actor_label=row.label)
 
 
 class AgentAuthError(Exception):
@@ -93,7 +91,6 @@ async def verify_agent_key(
     if (
         row is None
         or not ok
-        or row.revoked_at is not None
         or (row.expires_at is not None and row.expires_at <= now)
     ):
         raise AgentAuthError()
