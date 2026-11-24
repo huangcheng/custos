@@ -79,7 +79,7 @@ real deployment put your own TLS-terminating proxy in front and point
 [`docs/operations.md`](docs/operations.md).
 
 Then: paste the setup code, choose a password, enable TOTP, and **Keys → Mint**
-produces the first agent key (shown once).
+produces the first agent key (re-revealable later with a step-up).
 
 ### Passkeys are optional
 
