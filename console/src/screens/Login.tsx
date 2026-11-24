@@ -1,8 +1,13 @@
-import { useCallback, useState } from "react";
+import { Fragment, useCallback, useState } from "react";
 import { ApiError, api, setCsrf, setCsrf as rememberCsrf } from "../api";
 import { Button, Notice, TextField } from "../components/Field";
 import { LoginInputError, loginPayload, setupPayload } from "../login";
 import type { AuthStatus } from "../types";
+import {
+  decodeRequestOptions,
+  encodeAssertion,
+  type PublicKeyCredentialRequestOptionsJSON,
+} from "../webauthn";
 
 type Props = {
   status: AuthStatus;
@@ -59,6 +64,10 @@ export function Login({ status, onAuthenticated }: Props) {
   const [password, setPassword] = useState("");
   const [second, setSecond] = useState("");
   const [useRecovery, setUseRecovery] = useState(false);
+  // TOTP-enabled accounts sign in in two steps: credentials, then the
+  // verification-code page (where the recovery fallback lives). The advance
+  // is client-side — a password-only POST would just burn a 401/lockout row.
+  const [step, setStep] = useState<"credentials" | "code">("credentials");
   const [setupCode, setSetupCode] = useState("");
   const [setupDone, setSetupDone] = useState(false);
   const setup = status.setup_required && !setupDone;
@@ -67,6 +76,22 @@ export function Login({ status, onAuthenticated }: Props) {
   const turnstile = useTurnstile(status.turnstile_sitekey);
 
   const submit = useCallback(async () => {
+    if (!setup && status.totp_required && step === "credentials") {
+      if (!username.trim() || !password) {
+        setError("Enter your username and password first.");
+        return;
+      }
+      setStep("code");
+      setError("");
+      // the code step remounts the widget: never submit a token solved on
+      // the credentials page after the step changed
+      turnstile.reset();
+      return;
+    }
+    if (!setup && !second.trim() && (step === "code" || useRecovery)) {
+      setError(useRecovery ? "Enter a recovery code." : "Enter your authenticator code.");
+      return;
+    }
     setBusy(true);
     setError("");
     try {
@@ -95,6 +120,9 @@ export function Login({ status, onAuthenticated }: Props) {
       if (err instanceof LoginInputError) setError(err.message);
       else if (err instanceof ApiError) setError(err.message);
       else setError("login failed");
+      // a rejected TOTP code can never become valid (window passed): clear
+      // it so a second Enter cannot burn another lockout row on a stale value
+      if (step === "code" && !useRecovery) setSecond("");
       // a Turnstile token is single-use server-side: drop the spent one so the
       // next attempt submits a fresh widget response instead of a dead token
       turnstile.reset();
@@ -103,6 +131,7 @@ export function Login({ status, onAuthenticated }: Props) {
     }
   }, [
     setup,
+    step,
     username,
     password,
     setupCode,
@@ -110,6 +139,7 @@ export function Login({ status, onAuthenticated }: Props) {
     second,
     status.totp_required,
     turnstile.token,
+    turnstile.reset,
     onAuthenticated,
   ]);
 
@@ -150,6 +180,23 @@ export function Login({ status, onAuthenticated }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reset is stable
   }, [turnstile.token, onAuthenticated, ]);
 
+  let title = "Sign in";
+  let subtitle = "Operator credentials only.";
+  if (setup) {
+    title = "First-run setup";
+    subtitle = "Paste the setup code from the server's data directory.";
+  } else if (step === "code") {
+    title = "Verification code";
+    subtitle = `Second factor for ${username}.`;
+  }
+  let submitLabel = "Sign in";
+  if (setup) {
+    submitLabel = "Create account";
+  } else if (status.totp_required && step === "credentials") {
+    // nothing has been verified yet: this button only advances to the code step
+    submitLabel = "Continue";
+  }
+
   return (
     <div className="auth">
       <div className="auth-brand">
@@ -176,12 +223,8 @@ export function Login({ status, onAuthenticated }: Props) {
           }}
         >
           <div>
-            <h2 className="page-title">{setup ? "First-run setup" : "Sign in"}</h2>
-            <p className="page-sub">
-              {setup
-                ? "Paste the setup code from the server's data directory."
-                : "Operator credentials only."}
-            </p>
+            <h2 className="page-title">{title}</h2>
+            <p className="page-sub">{subtitle}</p>
           </div>
           {error ? <Notice kind="error">{error}</Notice> : null}
           {setupDone ? (
@@ -189,135 +232,129 @@ export function Login({ status, onAuthenticated }: Props) {
               Account created. Sign in below with the password you just set.
             </Notice>
           ) : null}
-          <TextField
-            label="Username"
-            value={username}
-            onChange={setUsername}
-            autoComplete="username"
-            autoFocus
-          />
-          <TextField
-            label="Password"
-            value={password}
-            onChange={setPassword}
-            type="password"
-            autoComplete={setup ? "new-password" : "current-password"}
-            hint={setup ? "At least 12 characters." : undefined}
-          />
-          {setup ? (
-            <TextField
-              label="Setup code"
-              value={setupCode}
-              onChange={setSetupCode}
-              autoComplete="off"
-              hint="Read from the 0600 file in the data directory."
-            />
-          ) : null}
-          {!setup && (status.totp_required || useRecovery) ? (
-            <TextField
-              label={useRecovery ? "Recovery code" : "Authenticator code"}
-              value={second}
-              onChange={setSecond}
-              inputMode={useRecovery ? "text" : "numeric"}
-              autoComplete="one-time-code"
-            />
-          ) : null}
-          {!setup ? (
-            <div key={turnstile.epoch} ref={turnstile.attach} />
-          ) : null}
-          <Button
-            label={setup ? "Create account" : "Sign in"}
-            variant="primary"
-            type="submit"
-            disabled={busy}
-          />
-          {!setup ? (
-            <div className="row">
-              <button
-                type="button"
-                className="ghost"
-                onClick={() => {
-                  setUseRecovery((prev) => !prev);
-                  setSecond("");
-                }}
-              >
-                {useRecovery ? "Use authenticator instead" : "Use a recovery code"}
-              </button>
-              {status.passkey_available ? (
+          {!setup && step === "code" ? (
+            <Fragment key="code">
+              <TextField
+                label={useRecovery ? "Recovery code" : "Authenticator code"}
+                value={second}
+                onChange={setSecond}
+                inputMode={useRecovery ? "text" : "numeric"}
+                autoComplete="one-time-code"
+                autoFocus
+              />
+              <div key={turnstile.epoch} ref={turnstile.attach} />
+              <Button label="Sign in" variant="primary" type="submit" disabled={busy} />
+              <div className="row">
                 <button
                   type="button"
                   className="ghost"
-                  onClick={() => void passkey()}
                   disabled={busy}
+                  onClick={() => {
+                    setStep("credentials");
+                    setSecond("");
+                    setUseRecovery(false);
+                    setError("");
+                    turnstile.reset();
+                  }}
                 >
-                  Use a passkey
+                  Back
                 </button>
+                {status.recovery_available ? (
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={busy}
+                    onClick={() => {
+                      setUseRecovery((prev) => !prev);
+                      setSecond("");
+                      setError("");
+                    }}
+                  >
+                    {useRecovery ? "Use authenticator instead" : "Use a recovery code instead"}
+                  </button>
+                ) : null}
+              </div>
+            </Fragment>
+          ) : (
+            <Fragment key="credentials">
+              <TextField
+                label="Username"
+                value={username}
+                onChange={setUsername}
+                autoComplete="username"
+                autoFocus
+              />
+              <TextField
+                label="Password"
+                value={password}
+                onChange={setPassword}
+                type="password"
+                autoComplete={setup ? "new-password" : "current-password"}
+                hint={setup ? "At least 12 characters." : undefined}
+              />
+              {setup ? (
+                <TextField
+                  label="Setup code"
+                  value={setupCode}
+                  onChange={setSetupCode}
+                  autoComplete="off"
+                  hint="Read from the 0600 file in the data directory."
+                />
               ) : null}
-            </div>
-          ) : null}
+              {!setup && !status.totp_required && useRecovery ? (
+                <TextField
+                  label="Recovery code"
+                  value={second}
+                  onChange={setSecond}
+                  inputMode="text"
+                  autoComplete="one-time-code"
+                />
+              ) : null}
+              {/* the widget mounts wherever a POST can originate: the code
+                  step for TOTP, the credentials step for password-only and
+                  passkey logins (assert/verify also requires the token) */}
+              {!setup && (!status.totp_required || status.passkey_available) ? (
+                <div key={turnstile.epoch} ref={turnstile.attach} />
+              ) : null}
+              <Button
+                label={submitLabel}
+                variant="primary"
+                type="submit"
+                disabled={busy}
+              />
+              {!setup ? (
+                <div className="row">
+                  {/* recovery is a TOTP fallback: on the code step when TOTP is
+                      enabled; inline here only in the TOTP-off recovery window */}
+                  {!status.totp_required && status.recovery_available ? (
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => {
+                        setUseRecovery((prev) => !prev);
+                        setSecond("");
+                        setError("");
+                      }}
+                    >
+                      {useRecovery ? "Use password only" : "Use a recovery code"}
+                    </button>
+                  ) : null}
+                  {status.passkey_available ? (
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => void passkey()}
+                      disabled={busy}
+                    >
+                      Use a passkey
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </Fragment>
+          )}
         </form>
       </div>
     </div>
   );
-}
-
-// --- WebAuthn JSON ⇄ binary helpers (the server speaks JSON) ---
-
-type PublicKeyCredentialRequestOptionsJSON = {
-  challenge: string;
-  allowCredentials?: { id: string; type: "public-key" }[];
-  userVerification?: UserVerificationRequirement;
-  rpId?: string;
-  timeout?: number;
-};
-
-function b64urlToBytes(value: string): Uint8Array<ArrayBuffer> {
-  const padded = value.replaceAll("-", "+").replaceAll("_", "/");
-  const raw = atob(padded + "=".repeat((4 - (padded.length % 4)) % 4));
-  const out = new Uint8Array(new ArrayBuffer(raw.length));
-  for (let i = 0; i < raw.length; i += 1) out[i] = raw.charCodeAt(i);
-  return out;
-}
-
-function bytesToB64url(bytes: ArrayBuffer): string {
-  const view = new Uint8Array(bytes);
-  let raw = "";
-  for (const byte of view) raw += String.fromCharCode(byte);
-  return btoa(raw).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-}
-
-function decodeRequestOptions(
-  json: PublicKeyCredentialRequestOptionsJSON,
-): PublicKeyCredentialRequestOptions {
-  return {
-    challenge: b64urlToBytes(json.challenge),
-    ...(json.allowCredentials
-      ? {
-          allowCredentials: json.allowCredentials.map((c) => ({
-            id: b64urlToBytes(c.id),
-            type: c.type,
-          })),
-        }
-      : {}),
-    ...(json.userVerification ? { userVerification: json.userVerification } : {}),
-    ...(json.rpId ? { rpId: json.rpId } : {}),
-    ...(json.timeout ? { timeout: json.timeout } : {}),
-  };
-}
-
-export function encodeAssertion(credential: PublicKeyCredential): Record<string, unknown> {
-  const response = credential.response as AuthenticatorAssertionResponse;
-  return {
-    id: credential.id,
-    rawId: bytesToB64url(credential.rawId),
-    type: credential.type,
-    response: {
-      clientDataJSON: bytesToB64url(response.clientDataJSON),
-      authenticatorData: bytesToB64url(response.authenticatorData),
-      signature: bytesToB64url(response.signature),
-      ...(response.userHandle
-        ? { userHandle: bytesToB64url(response.userHandle) }
-        : {}),
-    },
-  };
 }

@@ -245,6 +245,27 @@ async def test_passkeys_disabled_404(pg_db: str) -> None:
         assert st.json()["passkey_available"] is False
 
 
+async def test_status_passkey_flags_follow_registration(env3) -> None:
+    """Login option needs a registered credential; management needs config."""
+    import dataclasses
+
+    import httpx
+
+    from custos.app import create_app
+
+    maker, settings = env3
+    settings = dataclasses.replace(settings, skip_migrate=True)
+    app = create_app(settings)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+        st = (await c.get("/api/auth/status")).json()
+        assert st["passkey_configured"] is True
+        assert st["passkey_available"] is False  # configured, nothing registered
+        await _register(maker, settings, SoftAuthenticator())
+        st = (await c.get("/api/auth/status")).json()
+        assert st["passkey_available"] is True
+
+
 async def test_sign_count_never_decreases(env3) -> None:
     maker, settings = env3
     auth = SoftAuthenticator()

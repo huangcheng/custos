@@ -118,6 +118,8 @@ export function App() {
           totp_required: false,
           turnstile_sitekey: null,
           passkey_available: false,
+          passkey_configured: false,
+          recovery_available: false,
         },
       });
       go("/", true);

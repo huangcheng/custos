@@ -70,15 +70,17 @@ except subprocess.CalledProcessError as exc:
 with open(f"{run}/env", "w") as f:
     f.write(f"CUSTOS_DB_PASSWORD={pw}\nCUSTOS_SECRETS_DIR={run}/secrets\n"
             f"CUSTOS_TRUSTED_PROXIES=172.16.0.0/12\nCUSTOS_PORT={os.environ['E2E_PORT']}\n"
-            f"CUSTOS_ALLOWED_ORIGINS=http://127.0.0.1:{os.environ['E2E_PORT']}\n"
-            f"CUSTOS_WEBAUTHN_RP_ID=127.0.0.1\n")
+            f"CUSTOS_ALLOWED_ORIGINS=http://localhost:{os.environ['E2E_PORT']}\n"
+            f"CUSTOS_WEBAUTHN_RP_ID=localhost\n")
 PYEOF
 
 echo "== start stack (console baked into the image)"
 "${COMPOSE[@]}" up -d --build > "$RUN_DIR/compose.log" 2>&1 || fail "compose up (see $RUN_DIR/compose.log)"
-BASE="http://127.0.0.1:$E2E_PORT"
+# localhost (not 127.0.0.1): browsers reject IP-literal WebAuthn rpIds; the
+# http origin is accepted because it is spelled out in CUSTOS_ALLOWED_ORIGINS
+BASE="http://localhost:$E2E_PORT"
 for i in $(seq 1 90); do
-  curl -fsS -m 2 "$BASE/healthz" >/dev/null 2>&1 && break
+  curl -fsS -m 2 "http://127.0.0.1:$E2E_PORT/healthz" >/dev/null 2>&1 && break
   sleep 1
   [ "$i" = 90 ] && fail "app did not become healthy"
 done
@@ -127,6 +129,22 @@ const PW = "cu-test-console-password";
 const SECRET_VALUE = "cu-test-console-secret-42";
 const ITEM = "cu-test-console-item";
 let n = 0;
+let failuresBaseline = 0;
+const authFailures = () => page.evaluate(async () => {
+  // keyset pages cap at 50: follow next_cursor for an exact total
+  let total = 0;
+  let cursor = "";
+  for (let page_i = 0; page_i < 20; page_i += 1) {
+    const url = "/api/admin/audit?action=auth.failure" + (cursor ? `&cursor=${cursor}` : "");
+    const res = await fetch(url, { credentials: "same-origin" });
+    if (res.status !== 200) throw new Error(`auth.failure audit query failed: ${res.status}`);
+    const body = await res.json();
+    total += body.items.length;
+    if (!body.next_cursor) return total;
+    cursor = body.next_cursor;
+  }
+  throw new Error("auth.failure audit pagination did not terminate");
+});
 // textContent misses <input value>, title, placeholder — exactly where a secret
 // would most likely leak. This scans text AND attribute values.
 const leaked = (needle) =>
@@ -185,6 +203,14 @@ await page.evaluate(async () => {
   throw new Error("console did not mount");
 });
 ok(await page.evaluate(() => document.body.textContent.includes("Sign in")), "login screen renders");
+// bare account (no TOTP, no live recovery codes, no passkeys): the login
+// page must not offer dead-end factor shortcuts (rev 37 login-UX fix)
+ok(
+  await page.evaluate(() =>
+    ![...document.querySelectorAll("button")].some((b) =>
+      /recovery code|passkey/i.test(b.textContent))),
+  "no recovery/passkey shortcuts on a bare password account",
+);
 
 await page.evaluate(async ({ pw }) => {
   const set = (el, v) => {
@@ -201,6 +227,7 @@ await page.evaluate(async ({ pw }) => {
 }, { pw: PW });
 await until(() => page.evaluate(() => location.pathname === "/items"), "the /items route");
 ok(true, "signed in, landed on /items");
+failuresBaseline = await authFailures();
 
 // 2. CSRF works after a reload (in-memory token recovered from auth/status)
 await page.goto(`${BASE}/items`);
@@ -565,6 +592,284 @@ ok(
   }),
   "API still reachable after SPA navigation",
 );
+
+// 11. TOTP two-step sign-in (rev 37 login UX): enable TOTP through the real
+// API, log out, and prove the credentials→code advance is client-side (no
+// password-only POST burning a 401/lockout row), the recovery fallback lives
+// on the code step and actually signs in, and the empty/wrong-code guards hold.
+async function totpCodeAt(secretB32, step) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = 0, value = 0;
+  const bytes = [];
+  for (const ch of secretB32.toUpperCase().replace(/=+$/, "")) {
+    const idx = alphabet.indexOf(ch);
+    if (idx < 0) throw new Error(`non-base32 character in TOTP secret: ${ch}`);
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) { bytes.push((value >>> (bits - 8)) & 255); bits -= 8; }
+  }
+  const msg = new Uint8Array(8);
+  let c = step;
+  for (let i = 7; i >= 0; i -= 1) { msg[i] = c & 255; c = Math.floor(c / 256); }
+  const subtle = globalThis.crypto?.subtle
+    ?? (await import("node:crypto")).webcrypto.subtle;
+  const key = await subtle.importKey(
+    "raw", new Uint8Array(bytes), { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+  const sig = new Uint8Array(await subtle.sign("HMAC", key, msg));
+  const off = sig[sig.length - 1] & 15;
+  const num = (((sig[off] & 127) << 24) | (sig[off + 1] << 16)
+    | (sig[off + 2] << 8) | sig[off + 3]) % 1000000;
+  return String(num).padStart(6, "0");
+}
+const totpCode = (secret) => totpCodeAt(secret, Math.floor(Date.now() / 1000 / 30));
+// the step-up site has a per-site monotonic replay counter: two step-ups in
+// the same 30 s window must use different steps. Track the last accepted
+// step and advance (waiting for the next window if the ±1 bound requires it).
+let lastStepupStep = -1;
+async function stepupCode(secret) {
+  const deadline = Date.now() + 90000; // at most a few 30 s windows
+  for (;;) {
+    if (Date.now() > deadline) {
+      throw new Error(`no usable step-up TOTP step (last=${lastStepupStep})`);
+    }
+    const nowStep = Math.floor(Date.now() / 1000 / 30);
+    const step = Math.max(nowStep, lastStepupStep + 1);
+    if (step <= nowStep + 1) {
+      lastStepupStep = step;
+      return totpCodeAt(secret, step);
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+const post = (path, body, headers) => page.evaluate(async ({ path, body, headers }) => {
+  const res = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, json: await res.json().catch(() => ({})) };
+}, { path, body, headers });
+const csrfNow = () => page.evaluate(async () => {
+  const st = await (await fetch("/api/auth/status", { credentials: "same-origin" })).json();
+  if (!st.csrf_token) throw new Error("no csrf_token: session is not live");
+  return st.csrf_token;
+});
+const stepUp = async (totp) => {
+  const csrf = await csrfNow();
+  const r = await post("/api/auth/step-up",
+    { password: PW, ...(totp ? { totp } : {}) }, { "x-csrf-token": csrf });
+  if (r.status !== 200) throw new Error(`step-up failed: ${r.status}`);
+  return { csrf, su: r.json.step_up_token };
+};
+// fill fields then poll until the target button is enabled before clicking
+// (no fixed sleeps: a click on a still-disabled button is a flake)
+const fillLogin = (pairs) => page.evaluate(({ pairs }) => {
+  const set = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, "value").set;
+    setter.call(el, v);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const inputs = [...document.querySelectorAll("form.auth-form input")];
+  for (const [kind, value] of pairs) {
+    const el = kind === "otp"
+      ? inputs.find((i) => i.getAttribute("autocomplete") === "one-time-code")
+      : kind === "password"
+        ? inputs.find((i) => i.type === "password")
+        : inputs.find((i) => i.getAttribute("autocomplete") === "username");
+    if (!el) throw new Error(`login input not found: ${kind}`);
+    set(el, value);
+  }
+}, { pairs });
+const fillStepUp = (password, factor) => page.evaluate(({ password, factor }) => {
+  const set = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, "value").set;
+    setter.call(el, v);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const form = document.querySelector(".scrim form");
+  if (!form) throw new Error("step-up prompt not open");
+  const inputs = [...form.querySelectorAll("input")];
+  set(inputs.find((i) => i.type === "password"), password);
+  if (factor != null) {
+    const otp = inputs.find((i) => i.getAttribute("autocomplete") === "one-time-code");
+    if (!otp) throw new Error("step-up factor field missing");
+    set(otp, factor);
+  }
+}, { password, factor });
+const clickWhenReady = (reSource, scopeSel, label) => until(() => page.evaluate(
+  ({ reSource, scopeSel }) => {
+    const scope = scopeSel ? document.querySelector(scopeSel) : document;
+    if (!scope) return false;
+    const re = new RegExp(reSource, "i");
+    const b = [...scope.querySelectorAll("button")].find((x) => re.test(x.textContent));
+    if (b && !b.disabled) { b.click(); return true; }
+    return false;
+  }, { reSource, scopeSel }), label);
+const logout = async () => {
+  const csrf = await csrfNow();
+  const r = await post("/api/auth/logout", {}, { "x-csrf-token": csrf });
+  if (r.status !== 200) throw new Error(`logout failed: ${r.status}`);
+  await page.goto(`${BASE}/`);
+  await until(() => page.evaluate(() => !!document.querySelector("form.auth-form")), "login after logout");
+};
+let totpSecret = "";
+let recoveryCodes = [];
+{
+  const { csrf, su } = await stepUp();
+  const setupR = await post("/api/auth/totp/setup", {}, { "x-csrf-token": csrf, "x-step-up-token": su });
+  if (setupR.status !== 200) throw new Error(`totp setup failed: ${setupR.status}`);
+  totpSecret = setupR.json.secret;
+  if (typeof totpSecret !== "string" || !/^[A-Z2-7]+=*$/i.test(totpSecret)) {
+    throw new Error(`totp setup returned no base32 secret: ${JSON.stringify(setupR.json)}`);
+  }
+  const fresh = await stepUp();
+  const confR = await post("/api/auth/totp/confirm", { code: await totpCode(totpSecret) },
+    { "x-csrf-token": fresh.csrf, "x-step-up-token": fresh.su });
+  ok(confR.status === 200 && confR.json.totp === "enabled", "TOTP enabled through the real API");
+  const afterEnable = await page.evaluate(async () =>
+    (await (await fetch("/api/auth/status", { credentials: "same-origin" })).json()));
+  ok(
+    afterEnable.totp_required === true && afterEnable.recovery_available === true,
+    "status reports TOTP required and live recovery codes after enable",
+  );
+  recoveryCodes = confR.json.recovery_codes;
+  ok(
+    Array.isArray(recoveryCodes) && recoveryCodes.length >= 2
+      && recoveryCodes.every((c) => typeof c === "string" && c.length > 0),
+    "totp confirm issues at least two recovery codes",
+  );
+  await logout();
+  ok(
+    await page.evaluate(() =>
+      !document.body.textContent.includes("Authenticator code")
+      && ![...document.querySelectorAll("button")].some((b) => /recovery code/i.test(b.textContent))),
+    "TOTP account: credentials step shows no code field and no recovery shortcut",
+  );
+  await fillLogin([["username", "operator"], ["password", PW]]);
+  await clickWhenReady("^Continue$", "form.auth-form", "credentials submit");
+  await until(() => page.evaluate(() =>
+    document.body.textContent.includes("Verification code")), "the client-side code step");
+  ok(true, "Sign in advances to the verification-code page");
+  ok(
+    await page.evaluate(() =>
+      [...document.querySelectorAll("button")].some((b) =>
+        /Use a recovery code instead/i.test(b.textContent))),
+    "the recovery fallback lives on the code step",
+  );
+  await clickWhenReady("^Back$", null, "Back to credentials");
+  await until(() => page.evaluate(() =>
+    document.body.textContent.includes("Operator credentials only.")), "Back returns to credentials");
+  ok(true, "Back returns to the credentials step");
+  // recovery branch: the fallback actually signs in (recovery_reset session)
+  await fillLogin([["username", "operator"], ["password", PW]]);
+  await clickWhenReady("^Continue$", "form.auth-form", "credentials submit (recovery)");
+  await until(() => page.evaluate(() =>
+    document.body.textContent.includes("Verification code")), "code step (recovery)");
+  await clickWhenReady("Use a recovery code instead", null, "toggle to recovery");
+  await until(() => page.evaluate(() =>
+    [...document.querySelectorAll("form.auth-form input")].some(
+      (i) => i.getAttribute("autocomplete") === "one-time-code" && i.inputMode === "text")),
+    "recovery field on the code step");
+  await fillLogin([["otp", recoveryCodes[0]]]);
+  await clickWhenReady("^Sign in$", "form.auth-form", "recovery submit");
+  await until(() => page.evaluate(() => location.pathname === "/items"), "recovery-code sign-in");
+  ok(true, "a recovery code on the code step completes sign-in");
+  ok(
+    await page.evaluate(async () =>
+      (await fetch("/api/admin/items", { credentials: "same-origin" })).status === 403),
+    "a recovery-code session is refused on the admin plane (recovery_reset)",
+  );
+  await logout();
+  // empty-code client guard: no POST, error on the code step
+  await fillLogin([["username", "operator"], ["password", PW]]);
+  await clickWhenReady("^Continue$", "form.auth-form", "credentials submit (guards)");
+  await until(() => page.evaluate(() =>
+    document.body.textContent.includes("Verification code")), "code step (guards)");
+  await clickWhenReady("^Sign in$", "form.auth-form", "empty-code submit");
+  await until(() => page.evaluate(() =>
+    document.body.textContent.includes("Enter your authenticator code.")), "empty-code guard message");
+  ok(true, "empty code is guarded client-side");
+  // wrong code: server 401, operator stays on the code step
+  await fillLogin([["otp", "000000"]]);
+  await clickWhenReady("^Sign in$", "form.auth-form", "wrong-code submit");
+  await until(() => page.evaluate(() =>
+    document.body.textContent.includes("Verification code")
+    && document.body.textContent.includes("authentication failed")),
+    "wrong code keeps the code step with the 401 message");
+  ok(true, "a wrong code stays on the code step");
+  // happy path: correct TOTP completes the two-step sign-in
+  await fillLogin([["otp", await totpCode(totpSecret)]]);
+  await clickWhenReady("^Sign in$", "form.auth-form", "TOTP submit");
+  await until(() => page.evaluate(() => location.pathname === "/items"), "TOTP sign-in completes");
+  ok(true, "password + authenticator code completes the two-step sign-in");
+  // delta vs the authenticated baseline: the client-side advance and the
+  // empty-code guard burned nothing; the wrong code burned exactly one;
+  // the successful sign-in burned nothing
+  ok(
+    (await authFailures()) === failuresBaseline + 1,
+    "advance + empty guard + success burned no lockout rows; wrong code burned one",
+  );
+  // a console step-up WITH the TOTP factor: ConfirmStepUp must render the
+  // authenticator field (totpRequired prop) and the reveal must succeed
+  await page.goto(`${BASE}/keys`);
+  await until(() => page.evaluate(() =>
+    [...document.querySelectorAll("button")].some((b) => /^Reveal$/i.test(b.textContent))),
+    "keys inventory with Reveal");
+  await clickWhenReady("^Reveal$", null, "reveal with TOTP step-up");
+  await until(() => page.evaluate(() => !!document.querySelector(".scrim form")), "reveal step-up");
+  await until(() => page.evaluate(() =>
+    (document.querySelector(".scrim form")?.textContent || "").includes("Authenticator code")),
+    "the step-up dialog to ask for the TOTP factor");
+  ok(true, "the step-up dialog asks for the TOTP factor when enabled");
+  await fillStepUp(PW, await stepupCode(totpSecret));
+  await clickWhenReady("^Continue$", ".scrim form", "reveal step-up continue");
+  await until(() => page.evaluate(() =>
+    !!document.querySelector('[data-testid="one-time-panel"]')), "re-revealed token panel");
+  ok(true, "console reveal completes with a TOTP-gated step-up");
+  await page.evaluate(() => {
+    const panel = document.querySelector('[data-testid="one-time-panel"]');
+    [...panel.querySelectorAll("button")].find((b) => /I have stored it/i.test(b.textContent)).click();
+  });
+}
+
+// 12. TOTP-off recovery window: disabling TOTP leaves the issued codes live,
+// so the credentials page offers the inline recovery toggle (not a code step).
+// (Passkey registration/sign-in is NOT browser-gated here: ego-browser's CDP
+// session cannot attach a virtual authenticator to the page — create() gets
+// NotAllowedError even on a fresh page. The passkey contract is covered by
+// the backend integration tests with a soft ES256 authenticator.)
+{
+  const { csrf, su } = await stepUp(await stepupCode(totpSecret));
+  const offR = await post("/api/auth/totp/disable", {}, { "x-csrf-token": csrf, "x-step-up-token": su });
+  if (offR.status !== 200) throw new Error(`totp disable failed: ${offR.status}`);
+  const st = await page.evaluate(async () =>
+    (await (await fetch("/api/auth/status", { credentials: "same-origin" })).json()));
+  ok(st.totp_required === false && st.recovery_available === true,
+    "TOTP off with live recovery codes (the recovery window)");
+  await logout();
+  ok(
+    await page.evaluate(() =>
+      [...document.querySelectorAll("button")].some((b) =>
+        /^Use a recovery code$/i.test(b.textContent))),
+    "the credentials page offers the inline recovery toggle in the recovery window",
+  );
+  await clickWhenReady("^Use a recovery code$", null, "inline recovery toggle");
+  await until(() => page.evaluate(() =>
+    [...document.querySelectorAll("form.auth-form input")].some(
+      (i) => i.getAttribute("autocomplete") === "one-time-code")), "inline recovery field");
+  await fillLogin([["username", "operator"], ["password", PW], ["otp", recoveryCodes[1]]]);
+  await clickWhenReady("^Sign in$", "form.auth-form", "recovery-window submit");
+  await until(() => page.evaluate(() => location.pathname === "/items"), "recovery-window sign-in");
+  ok(true, "a recovery code signs in from the credentials page in the recovery window");
+  ok(
+    await page.evaluate(async () =>
+      (await fetch("/api/admin/items", { credentials: "same-origin" })).status === 403),
+    "the recovery-window session is likewise confined (recovery_reset)",
+  );
+}
 
 await space.finish({ keep: [] });
 console.log("CONSOLE E2E PASS");

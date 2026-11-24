@@ -409,3 +409,20 @@ async def test_agent_keys_survive_a_password_change(maker) -> None:
         assert live.revoked_at is None, "a password change must not revoke agent keys"
         # the row survives with its digest intact (still verifiable)
         assert live.digest == bytes(32)
+
+
+async def test_status_recovery_available_follows_live_codes(rec_http) -> None:
+    from sqlalchemy import update
+
+    from custos.db.models import RecoveryCode
+
+    async with rec_http() as (client, maker, codes, app, settings):
+        st = (await client.get("/api/auth/status")).json()
+        assert st["recovery_available"] is True
+        async with maker() as s:
+            await s.execute(
+                update(RecoveryCode).values(consumed_at=datetime.now(UTC))
+            )
+            await s.commit()
+        st = (await client.get("/api/auth/status")).json()
+        assert st["recovery_available"] is False

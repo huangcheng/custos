@@ -5,7 +5,14 @@ export type AuthStatus = {
   setup_required: boolean;
   totp_required: boolean;
   turnstile_sitekey: string | null;
+  /** WebAuthn configured AND ≥1 registered credential — the login shortcut
+   *  can succeed; gate "Use a passkey" on this, never on configuration. */
   passkey_available: boolean;
+  /** WebAuthn configured (regardless of registrations) — gates the Settings
+   *  management section so the first passkey can be registered. */
+  passkey_configured: boolean;
+  /** ≥1 unconsumed recovery code — gates the recovery fallback/toggle. */
+  recovery_available: boolean;
   csrf_token?: string;
 };
 

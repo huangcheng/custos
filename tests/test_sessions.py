@@ -157,6 +157,11 @@ async def test_status_returns_csrf_with_live_cookie(http_stack) -> None:
         r = await client.get("/api/auth/status")
         assert r.status_code == 200
         assert r.json()["csrf_token"] == row.csrf_token
+        # factor flags are always present (semantics pinned by the dedicated
+        # passkey/recovery status tests; this shared DB carries their state)
+        assert isinstance(r.json()["recovery_available"], bool)
+        assert isinstance(r.json()["passkey_available"], bool)
+        assert isinstance(r.json()["passkey_configured"], bool)
 
 
 async def test_logout_revokes_and_clears(http_stack) -> None:

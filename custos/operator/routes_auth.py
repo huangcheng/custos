@@ -22,18 +22,30 @@ router = APIRouter(prefix="/api/auth")
 
 @router.get("/status")
 async def status(request: Request) -> dict[str, Any]:
+    from custos.db.models import PasskeyCredential, RecoveryCode
+
     async with request.app.state.session_maker() as session:
         acct = (
             await session.execute(select(OperatorAccount))
         ).scalar_one_or_none()
+        # factor availability is REAL state, not deployment config: the
+        # console must never offer a login option that cannot succeed
+        passkey_registered = (
+            await session.execute(select(PasskeyCredential.id).limit(1))
+        ).first() is not None
+        recovery_live = (
+            await session.execute(
+                select(RecoveryCode.id).where(RecoveryCode.consumed_at.is_(None)).limit(1)
+            )
+        ).first() is not None
+    webauthn_configured = _webauthn_configured(request.app.state.settings)
     result: dict[str, Any] = {
         "setup_required": acct is None,
         "totp_required": bool(acct is not None and acct.totp_enabled),
         "turnstile_sitekey": request.app.state.settings.turnstile_sitekey,
-        "passkey_available": bool(
-            request.app.state.settings.webauthn_rp_id
-            or request.app.state.settings.insecure_dev
-        ),
+        "passkey_available": webauthn_configured and passkey_registered,
+        "passkey_configured": webauthn_configured,
+        "recovery_available": bool(acct is not None) and recovery_live,
     }
     cookie = request.cookies.get(COOKIE_NAME)
     if cookie and not request.headers.get("authorization"):
@@ -79,9 +91,13 @@ def _totp_audit(session: Any, sess: OperatorSession, reason: str) -> None:
     )
 
 
+def _webauthn_configured(settings: Any) -> bool:
+    """Single source for the WebAuthn config gate (status + endpoint guard)."""
+    return bool(settings.webauthn_rp_id or settings.insecure_dev)
+
+
 def _passkeys_enabled(request: Request) -> None:
-    settings = request.app.state.settings
-    if not settings.webauthn_rp_id and not settings.insecure_dev:
+    if not _webauthn_configured(request.app.state.settings):
         raise AppError("not_found", "not found")
 
 

@@ -4,6 +4,7 @@ import { useOneTime } from "../onetime";
 import { Button, Notice, TextField } from "../components/Field";
 import { ConfirmStepUp } from "../components/ConfirmStepUp";
 import { KeyFormError, credentialAbout, expiryLabel, revealBlocker, tokenExpiryBody } from "../keys";
+import { decodeCreateOptions, encodeAttestation, type PublicKeyCredentialCreationOptionsJSON } from "../webauthn";
 import { truncate } from "../plain";
 import type {
   AuthStatus,
@@ -80,6 +81,10 @@ function Account({
   const [message, setMessage] = useState("");
   const oneTime = useOneTime();
   const [passkeys, setPasskeys] = useState<PasskeyRow[]>([]);
+  // two-phase registration (mirrors TOTP setup/confirm): each server call
+  // consumes its own single-use step-up token
+  const [pkCred, setPkCred] = useState<PublicKeyCredential | null>(null);
+  const [pkLabel, setPkLabel] = useState("");
   const [pending, setPending] = useState<null | ((token: string) => Promise<void>)>(null);
   const [totpSecret, setTotpSecret] = useState("");
   const [totpCode, setTotpCode] = useState("");
@@ -87,7 +92,7 @@ function Account({
   // GET /api/auth/passkeys is step-up gated, so listing is an explicit action
   // (one token) rather than a mount-time fetch that would always 401.
   const loadPasskeys = useCallback((token: string) => {
-    if (!status.passkey_available) return;
+    if (!status.passkey_configured) return;
     void api<{ passkeys: PasskeyRow[] }>("GET", "/api/auth/passkeys", undefined, {
       stepUpToken: token,
     })
@@ -95,7 +100,7 @@ function Account({
       .catch((err: unknown) => {
         setError(err instanceof ApiError ? err.message : "cannot load passkeys");
       });
-  }, [status.passkey_available]);
+  }, [status.passkey_configured]);
 
 
 
@@ -254,12 +259,41 @@ function Account({
           </div>
         ) : null}
       </div>
-      {status.passkey_available ? (
+      {status.passkey_configured ? (
         <div className="card stack">
           <h2 className="page-sub" style={{ margin: 0 }}>
             Passkeys
           </h2>
           <div className="row">
+            <Button
+              label="Register a passkey"
+              onClick={() =>
+                setPending(() => async (token: string) => {
+                  setError("");
+                  setMessage("");
+                  const options = await api<PublicKeyCredentialCreationOptionsJSON>(
+                    "POST", "/api/auth/passkeys/register/options", {},
+                    { stepUpToken: token },
+                  );
+                  let credential: PublicKeyCredential | null = null;
+                  try {
+                    credential = (await navigator.credentials.create({
+                      publicKey: decodeCreateOptions(options),
+                    })) as PublicKeyCredential | null;
+                  } catch (err) {
+                    const name = err instanceof Error ? err.name : "error";
+                    setError(`Passkey registration failed (${name}). Try again.`);
+                    return;
+                  }
+                  if (!credential) {
+                    setError("Passkey registration was cancelled.");
+                    return;
+                  }
+                  setPkCred(credential);
+                  setMessage("Confirm the registration below (needs a fresh step-up).");
+                })
+              }
+            />
             <Button
               label="Show registered passkeys"
               onClick={() =>
@@ -269,6 +303,65 @@ function Account({
               }
             />
           </div>
+          {pkCred ? (
+            <div className="stack">
+              <TextField
+                label="Passkey label"
+                value={pkLabel}
+                onChange={setPkLabel}
+                hint="Shown in the list so you can tell passkeys apart."
+              />
+              <div className="row">
+                <Button
+                  label="Confirm registration"
+                  variant="primary"
+                  onClick={() =>
+                    setPending(() => async (token: string) => {
+                      try {
+                        await api(
+                          "POST", "/api/auth/passkeys/register/verify",
+                          {
+                            ...encodeAttestation(pkCred),
+                            // the server rejects labels > 100 chars AFTER
+                            // consuming the single-use challenge: clamp here
+                            // so a created credential is never thrown away
+                            label: pkLabel.trim().slice(0, 100) || "passkey",
+                          },
+                          { stepUpToken: token },
+                        );
+                      } catch (err) {
+                        // the challenge is single-use / 120 s TTL: a failed
+                        // verify can never be retried with the same credential
+                        setPkCred(null);
+                        setPkLabel("");
+                        setMessage("");
+                        setError(
+                          err instanceof ApiError
+                            ? `${err.message} — start the registration again.`
+                            : "registration failed — start again.",
+                        );
+                        return;
+                      }
+                      setPkCred(null);
+                      setPkLabel("");
+                      setError("");
+                      setMessage("Passkey registered. Show registered passkeys to refresh.");
+                      onStatusChanged();
+                    })
+                  }
+                />
+                <Button
+                  label="Cancel"
+                  variant="ghost"
+                  onClick={() => {
+                    setPkCred(null);
+                    setPkLabel("");
+                    setMessage("");
+                  }}
+                />
+              </div>
+            </div>
+          ) : null}
           {passkeys.length === 0 ? (
             <p className="muted" style={{ margin: 0 }}>
               No passkeys loaded (listing requires a step-up).
