@@ -185,6 +185,17 @@ const until = async (fn, what, timeout = 15000) => {
     await new Promise((r) => setTimeout(r, 100));
   }
 };
+// fill-then-click helper shared by every section (defined here, before the
+// first use in section 7): poll until the target button is enabled, then click
+const clickWhenReady = (reSource, scopeSel, label) => until(() => page.evaluate(
+  ({ reSource, scopeSel }) => {
+    const scope = scopeSel ? document.querySelector(scopeSel) : document;
+    if (!scope) return false;
+    const re = new RegExp(reSource, "i");
+    const b = [...scope.querySelectorAll("button")].find((x) => re.test(x.textContent));
+    if (b && !b.disabled) { b.click(); return true; }
+    return false;
+  }, { reSource, scopeSel }), label);
 
 // NOTE: page.evaluate callbacks are serialized into the page, so they cannot
 // close over anything here. Each callback that types defines its own setter.
@@ -413,15 +424,53 @@ const MATCH = await page.evaluate(async ({ item, value }) => {
 }, { item: ITEM, value: SECRET_VALUE });
 ok(MATCH.ok, `If-Match rejects a stale revision (${MATCH.why})`);
 
-// 7. key mint: step-up gated; full-authority model (rev 38: label only)
+// 7. key mint: a header button opens the mint drawer (the console's modal
+// idiom); step-up gated; full-authority model (rev 38: label only)
 await page.goto(`${BASE}/keys`);
 await until(
-  () => page.evaluate(() => document.body.textContent.includes("Mint a key")),
+  () => page.evaluate(() => document.body.textContent.includes("Mint key")),
   "the keys screen",
 );
+ok(
+  await page.evaluate(() =>
+    ![...document.querySelectorAll("input")].some(
+      (i) => i.closest("label")?.textContent.startsWith("Label"))),
+  "the keys page shows no inline mint form — only the Mint key button",
+);
+await clickWhenReady("^Mint key$", null, "open the mint drawer");
+await until(() => page.evaluate(() => !!document.querySelector(".drawer form")), "the mint drawer");
+ok(
+  await page.evaluate(() => {
+    const scrim = document.querySelector(".scrim");
+    return !!scrim
+      && scrim.getAttribute("role") === "dialog"
+      && scrim.getAttribute("aria-modal") === "true"
+      && !!scrim.querySelector(".drawer form");
+  }),
+  "the mint form is a modal dialog",
+);
+ok(
+  await page.evaluate(() => {
+    const label = document.querySelector(".drawer form input");
+    return !!label && document.activeElement === label;
+  }),
+  "the Label input is focused when the drawer opens (panel focus does not steal autoFocus)",
+);
+// client-side validation stays inside the drawer: no step-up, no page error
+await clickWhenReady("^Mint key$", ".drawer form", "submit the mint form with an empty label");
+await until(
+  () => page.evaluate(() =>
+    (document.querySelector(".drawer")?.textContent || "").includes("label is required")),
+  "the empty-label validation message",
+);
+ok(
+  await page.evaluate(() =>
+    !!document.querySelector(".drawer form") && !document.querySelector("form.drawer")),
+  "an empty label is rejected inside the drawer, which stays open with no step-up",
+);
 await page.evaluate(() => {
-  const label = [...document.querySelectorAll("input")].find(
-    (i) => i.placeholder === "" && i.closest("label")?.textContent.startsWith("Label"),
+  const label = [...document.querySelectorAll(".drawer form input")].find(
+    (i) => i.closest("label")?.textContent.startsWith("Label"),
   );
   if (!label) throw new Error("key form label input not found");
   const set = (el, v) => {
@@ -431,11 +480,13 @@ await page.evaluate(() => {
     el.dispatchEvent(new Event("input", { bubbles: true }));
   };
   set(label, "cu-test-console-key");
-  [...document.querySelectorAll("button")].find((b) => /Mint key/i.test(b.textContent)).click();
 });
-await until(() => page.evaluate(() => !!document.querySelector(".scrim form")), "the mint step-up prompt");
+await clickWhenReady("^Mint key$", ".drawer form", "submit the mint form");
+// the mint drawer stays mounted under the step-up overlay, so the step-up
+// prompt must be located by its own form class, not ".scrim form"
+await until(() => page.evaluate(() => !!document.querySelector("form.drawer")), "the mint step-up prompt");
 await page.evaluate(({ pw }) => {
-  const prompt = document.querySelector(".scrim form");
+  const prompt = document.querySelector("form.drawer");
   const setter = Object.getOwnPropertyDescriptor(
     window.HTMLInputElement.prototype, "value").set;
   const pwInput = prompt.querySelector('input[type="password"]');
@@ -466,12 +517,16 @@ ok(
   ),
   "the one-time panel is rendered",
 );
+ok(
+  await page.evaluate(() => !document.querySelector(".drawer form")),
+  "the mint drawer closes after a successful mint",
+);
 
 // 7b. the inventory never carries the secret (the token IS re-revealable via
 // the Reveal button — rev 37 — but never embedded in list/UI state)
 await page.goto(`${BASE}/keys`);
 await until(
-  () => page.evaluate(() => document.body.textContent.includes("Mint a key")),
+  () => page.evaluate(() => document.body.textContent.includes("Mint key")),
   "the keys screen after reload",
 );
 await until(
@@ -695,15 +750,6 @@ const fillStepUp = (password, factor) => page.evaluate(({ password, factor }) =>
     set(otp, factor);
   }
 }, { password, factor });
-const clickWhenReady = (reSource, scopeSel, label) => until(() => page.evaluate(
-  ({ reSource, scopeSel }) => {
-    const scope = scopeSel ? document.querySelector(scopeSel) : document;
-    if (!scope) return false;
-    const re = new RegExp(reSource, "i");
-    const b = [...scope.querySelectorAll("button")].find((x) => re.test(x.textContent));
-    if (b && !b.disabled) { b.click(); return true; }
-    return false;
-  }, { reSource, scopeSel }), label);
 const logout = async () => {
   const csrf = await csrfNow();
   const r = await post("/api/auth/logout", {}, { "x-csrf-token": csrf });

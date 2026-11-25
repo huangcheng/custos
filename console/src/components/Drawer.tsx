@@ -15,8 +15,11 @@ export function Drawer({
 
   // The dialog is rendered on open, so focusing the panel makes Escape work
   // even when no child is auto-focused (keydown only bubbles from focus).
+  // Do not steal focus from a child that already took it via autoFocus: the
+  // mount effect runs after React applies autoFocus during commit.
   useEffect(() => {
-    panel.current?.focus();
+    const el = panel.current;
+    if (el && !el.contains(document.activeElement)) el.focus();
   }, []);
 
   return (
