@@ -179,7 +179,7 @@ async def get_audit(
     limit: str | None = None,
     p: AdminPrincipal = Depends(require_admin),
 ) -> dict[str, Any]:
-    """50/100 keyset pages (id ascending), AND-combined filters. Plain
+    """Keyset pages (id ascending), any size 1..100 (default 50), AND-combined filters. Plain
     admin auth; enumeration read — not audited (§4)."""
     page = _page_limit(limit)
     pepper = request.app.state.settings.pepper_raw

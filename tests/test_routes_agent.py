@@ -281,3 +281,18 @@ async def test_denial_reason_neutral_not_found(stack) -> None:
                 .scalars().all()
             )
             assert rows and rows[0].detail.get("reason") == "not_found"
+
+
+async def test_page_sizes_any_1_to_100(stack) -> None:
+    """rev 40: a caller (especially an MCP agent) may ask for any small page."""
+    async with stack() as (client, maker, tokens):
+        for size in (1, 5, 7, 50, 100):
+            r = await client.get(f"/api/items?limit={size}", headers=auth(tokens["rw"]))
+            assert r.status_code == 200, (size, r.text)
+        for bad in ("0", "101", "-1", "abc"):
+            r = await client.get(f"/api/items?limit={bad}", headers=auth(tokens["rw"]))
+            assert r.status_code == 422, (bad, r.status_code)
+            assert r.json()["code"] == "invalid"
+        # the same rule on search and on the admin audit page
+        r = await client.get("/api/search?q=x&limit=3", headers=auth(tokens["rw"]))
+        assert r.status_code == 200

@@ -299,6 +299,11 @@ def build_mcp_server(app: Starlette) -> MCPServer:
     @server.tool(name="custos_list_items")
     @_translate
     async def list_items(cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
+        """List items (metadata only: name, notes, field names/flags, revision).
+
+        Secret values are never included. `limit` is any page size 1..100
+        (default 50); follow `next_cursor` for the next page.
+        """
         from custos.routes_agent import list_via_engine
 
         key = _principal()
@@ -309,6 +314,11 @@ def build_mcp_server(app: Starlette) -> MCPServer:
     @server.tool(name="custos_search")
     @_translate
     async def search(q: str, cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
+        """Search item names, notes, and plain (non-secret) field names
+        (metadata only, never values).
+
+        `q` is a literal substring (max 256 chars). `limit` is 1..100.
+        """
         from custos.routes_agent import list_via_engine
 
         if not q or len(q) > 256:
@@ -321,6 +331,7 @@ def build_mcp_server(app: Starlette) -> MCPServer:
     @server.tool(name="custos_get_item")
     @_translate
     async def get(name: str) -> dict[str, Any]:
+        """Read one item with its field values, including secrets."""
         key = _principal()
         async with state.session_maker() as session:
             result = await get_item(session, state.session_maker, state.vault, key, name)
@@ -330,6 +341,10 @@ def build_mcp_server(app: Starlette) -> MCPServer:
     @server.tool(name="custos_env")
     @_translate
     async def env(name: str) -> str:
+        """Render one item as shell `export NAME='value'` lines, safely quoted.
+
+        Hazardous names (PATH, LD_*, …) are emitted commented out.
+        """
         key = _principal()
         async with state.session_maker() as session:
             result = await get_item(session, state.session_maker, state.vault, key, name)
@@ -343,6 +358,12 @@ def build_mcp_server(app: Starlette) -> MCPServer:
     async def put(
         name: str, notes: str, fields: list[dict[str, Any]], if_match: str | None = None
     ) -> dict[str, Any]:
+        """Create or replace an item (upsert).
+
+        `fields` is a list of {name, secret, value}; a secret entry without a
+        value keeps the stored one. `if_match` is the entity-tag for optimistic
+        concurrency, quoted exactly as returned (`"<revision>"`).
+        """
         key = _principal()
         body = {"notes": notes, "fields": fields}
         async with state.session_maker() as session:
@@ -361,6 +382,12 @@ def build_mcp_server(app: Starlette) -> MCPServer:
         fields: list[dict[str, Any]] | None = None,
         if_match: str | None = None,
     ) -> dict[str, Any]:
+        """Partially update an item.
+
+        Omitted `notes`/`fields` are left alone; a field entry with
+        `value: null` removes that field. `if_match` is the quoted entity-tag
+        exactly as returned (`"<revision>"`).
+        """
         key = _principal()
         body: dict[str, Any] = {}
         if notes is not None:
@@ -378,6 +405,7 @@ def build_mcp_server(app: Starlette) -> MCPServer:
     @server.tool(name="custos_delete_item")
     @_translate
     async def delete(name: str) -> dict[str, Any]:
+        """Soft-delete an item (recoverable by the operator; history kept)."""
         key = _principal()
         async with state.session_maker() as session:
             await soft_delete(session, state.session_maker, state.vault, key, name)

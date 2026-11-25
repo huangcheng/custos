@@ -3,7 +3,7 @@
 Every authenticated key has full item-plane authority (rev 38: no scope or
 mode checks — every key reads and writes every item). List/search are
 metadata-only, exclude soft-deleted items, and paginate with opaque
-cursors (50/100).
+cursors (any page size 1..100, default 50).
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from custos.limits import FieldView
 
 router = APIRouter(prefix="/api")
 
-_PAGE_SIZES = (50, 100)
+_PAGE_MIN, _PAGE_MAX = 1, 100  # default page 50; any size in range is accepted
 _BODY_MAX = 2 * 1024 * 1024  # §4 request-body cap
 
 
@@ -68,8 +68,10 @@ def _page_limit(raw: str | None) -> int:
         limit = int(raw)
     except ValueError:
         raise AppError("invalid", "invalid limit") from None
-    if limit not in _PAGE_SIZES:
-        raise AppError("invalid", "limit must be 50 or 100")
+    # any size in 1..100 (rev 40): callers — especially MCP agents picking a
+    # small page — must not be rejected for a reasonable value
+    if not _PAGE_MIN <= limit <= _PAGE_MAX:
+        raise AppError("invalid", f"limit must be between {_PAGE_MIN} and {_PAGE_MAX}")
     return limit
 
 

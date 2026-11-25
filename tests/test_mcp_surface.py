@@ -197,3 +197,16 @@ async def test_mcp_unverified_prefix_does_not_burn_bucket(stack_factory) -> None
         # victim's request bucket untouched by unverified prefixes
         events = app.state.rate_limiter._requests.get(key_id)
         assert not events
+
+
+async def test_mcp_small_page_and_tool_descriptions(stack_factory) -> None:
+    """rev 40: an agent asking for a small page must not be rejected, and the
+    tools advertise what they do (a gateway shows these descriptions)."""
+    async with stack_factory() as (app, maker, tokens), _mcp_client(app, tokens["rw"]) as client:
+        r = await client.call_tool("custos_list_items", {"limit": 5})
+        assert not r.is_error
+        listed = await client.list_tools()
+        by_name = {t.name: t for t in listed.tools}
+        assert by_name["custos_list_items"].description
+        assert "1..100" in by_name["custos_list_items"].description
+        assert by_name["custos_get_item"].description
