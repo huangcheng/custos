@@ -43,7 +43,10 @@ pub async fn run(client: &Client, cmd: KeyCommand, as_json: bool) -> Result<(), 
                         println!("{}", serde_json::to_string_pretty(&out)?);
                     } else {
                         println!("{token}");
-                        let kid = out.get("key_id").and_then(|v| v.as_str()).unwrap_or("<key_id>");
+                        let kid = out
+                            .get("key_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("<key_id>");
                         eprintln!("(key_id {kid}; re-reveal later with `custos key reveal {kid}`)");
                     }
                 }
@@ -64,7 +67,9 @@ pub async fn run(client: &Client, cmd: KeyCommand, as_json: bool) -> Result<(), 
                         "{}\t{}\t{}",
                         key.get("key_id").and_then(Value::as_str).unwrap_or("?"),
                         key.get("label").and_then(Value::as_str).unwrap_or("?"),
-                        key.get("expires_at").and_then(Value::as_str).unwrap_or("never"),
+                        key.get("expires_at")
+                            .and_then(Value::as_str)
+                            .unwrap_or("never"),
                     );
                 }
             }

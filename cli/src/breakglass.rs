@@ -393,7 +393,8 @@ pub async fn retention(dsn: &str) -> Result<(), CliError> {
         .await
         .map_err(|e| CliError::Config(format!("prune lockout_suppressions: {e}")))?;
 
-    let total = history + audit_n + events + step_ups + devices + challenges + sessions + suppressions;
+    let total =
+        history + audit_n + events + step_ups + devices + challenges + sessions + suppressions;
     audit(
         &tx,
         "retention",

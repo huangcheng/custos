@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api } from "../api";
-import { showCredential, useOneTime } from "../onetime";
+import { revealCredential, showCredential, useOneTime } from "../onetime";
 import { Button, Notice, TextField } from "../components/Field";
 import { ConfirmStepUp } from "../components/ConfirmStepUp";
 import {
@@ -8,7 +8,6 @@ import {
   credentialAbout,
   expiryLabel,
   revealBlocker,
-  revealCredential,
   tokenExpiryBody,
 } from "../keys";
 import { decodeCreateOptions, encodeAttestation, type PublicKeyCredentialCreationOptionsJSON } from "../webauthn";
@@ -494,37 +493,37 @@ function Tokens({ totpRequired }: { totpRequired: boolean }) {
       {/* inert while the mint POST is in flight: the form resets on success,
           and nothing typed behind the request should be silently dropped */}
       <fieldset className="stack" disabled={minting}>
-      <div className="card stack">
-        <h2 className="page-sub" style={{ margin: 0 }}>
-          Mint an operator token
-        </h2>
-        <div className="row">
-          <TextField label="Label" value={label} onChange={setLabel} />
-          <TextField
-            label="Expires"
-            value={expiresAt}
-            onChange={setExpiresAt}
-            hint="Required. Max 30 days when sensitive."
-          />
-          <label className="row" style={{ alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={allowSensitive}
-              onChange={(event) => setAllowSensitive(event.target.checked)}
-              style={{ width: 18, minHeight: 18 }}
+        <div className="card stack">
+          <h2 className="page-sub" style={{ margin: 0 }}>
+            Mint an operator token
+          </h2>
+          <div className="row">
+            <TextField label="Label" value={label} onChange={setLabel} />
+            <TextField
+              label="Expires"
+              value={expiresAt}
+              onChange={setExpiresAt}
+              hint="Required. Max 30 days when sensitive."
             />
-            <span>allow sensitive operations</span>
-          </label>
+            <label className="row" style={{ alignItems: "center", gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={allowSensitive}
+                onChange={(event) => setAllowSensitive(event.target.checked)}
+                style={{ width: 18, minHeight: 18 }}
+              />
+              <span>allow sensitive operations</span>
+            </label>
+          </div>
+          <div className="row">
+            <Button
+              label="Mint token"
+              variant="primary"
+              disabled={minting}
+              onClick={() => void mint()}
+            />
+          </div>
         </div>
-        <div className="row">
-          <Button
-            label="Mint token"
-            variant="primary"
-            disabled={minting}
-            onClick={() => void mint()}
-          />
-        </div>
-      </div>
       </fieldset>
       <div className="card" style={{ padding: 0 }}>
         {rows.length === 0 ? (

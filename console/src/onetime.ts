@@ -6,6 +6,8 @@
 // when the operator explicitly dismisses it.
 import { useCallback, useSyncExternalStore } from "react";
 
+import { api } from "./api";
+
 export type OneTime = {
   /** short kind tag, used to scope the visible panel */
   kind:
@@ -87,4 +89,21 @@ export function useOneTime(): {
     () => queue.length,
   );
   return { oneTime: snapshot, pending, show, dismiss };
+}
+
+/** One fetch for both credential screens (rev 39: session alone, no step-up).
+ *  Lives here, next to the panel policy it feeds, so the React-free form/body
+ *  module stays free of the UI store. Errors propagate: each screen decides
+ *  where its notice belongs. */
+export async function revealCredential(
+  kind: "agent-key" | "operator-token",
+  keyId: string,
+  about: string,
+): Promise<void> {
+  const path = kind === "agent-key" ? "keys" : "tokens";
+  const data = await api<{ token: string }>(
+    "GET",
+    `/api/admin/${path}/${encodeURIComponent(keyId)}/reveal`,
+  );
+  showCredential(kind, { token: data.token, about });
 }

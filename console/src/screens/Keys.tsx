@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, status } from "../api";
-import { showCredential } from "../onetime";
+import { revealCredential, showCredential } from "../onetime";
 import { Button, Notice, TextField } from "../components/Field";
 import { ConfirmStepUp } from "../components/ConfirmStepUp";
 import { Drawer } from "../components/Drawer";
@@ -10,7 +10,6 @@ import {
   expiryLabel,
   mintKeyBody,
   revealBlocker,
-  revealCredential,
   type KeyForm,
 } from "../keys";
 import { truncate } from "../plain";
@@ -114,7 +113,8 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
   };
 
   const reveal = async (row: KeyRow) => {
-    setConfirm(null);
+    // never touch `confirm`: a Delete step-up may be armed, and wiping its
+    // title/message would hide what the password prompt is about to do
     setError("");
     setBusy(true);
     try {
@@ -140,7 +140,7 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
         <Button
           label="Mint key"
           variant="primary"
-          disabled={mintBusy || minting}
+          disabled={mintBusy || minting || pending !== null}
           onClick={() => {
             setForm(BLANK);
             setMintError("");

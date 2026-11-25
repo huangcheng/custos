@@ -39,7 +39,12 @@ pub async fn run(client: &Client, cmd: TokenCommand, as_json: bool) -> Result<()
                 "allow_sensitive": allow_sensitive,
             });
             let out = client
-                .post(RouteClass::SessionOnly, "/api/admin/tokens", Some(body), None)
+                .post(
+                    RouteClass::SessionOnly,
+                    "/api/admin/tokens",
+                    Some(body),
+                    None,
+                )
                 .await?;
             match out.get("token").and_then(Value::as_str) {
                 Some(token) => {
@@ -47,8 +52,13 @@ pub async fn run(client: &Client, cmd: TokenCommand, as_json: bool) -> Result<()
                         println!("{}", serde_json::to_string_pretty(&out)?);
                     } else {
                         println!("{token}");
-                        let kid = out.get("key_id").and_then(|v| v.as_str()).unwrap_or("<key_id>");
-                        eprintln!("(key_id {kid}; re-reveal later with `custos token reveal {kid}`)");
+                        let kid = out
+                            .get("key_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("<key_id>");
+                        eprintln!(
+                            "(key_id {kid}; re-reveal later with `custos token reveal {kid}`)"
+                        );
                     }
                 }
                 None => return Err(CliError::Config("server returned no token".into())),

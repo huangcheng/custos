@@ -1,9 +1,6 @@
 // Key-mint form ⇄ API body (§6, rev 38). Kept React-free for unit tests.
 // Every key has full item-plane authority: no mode, no scopes.
 
-import { api } from "./api.ts";
-import { showCredential } from "./onetime.ts";
-
 export type KeyForm = {
   label: string;
   expiresAt: string;
@@ -39,18 +36,6 @@ export function credentialAbout(c: { label: string; key_id: string }): string {
   return `${c.label} · ${c.key_id}`;
 }
 
-/** One fetch for both credential screens (rev 39: session alone, no step-up).
- *  The panel policy lives in showCredential; errors propagate so each screen
- *  decides where its notice belongs. */
-export async function revealCredential(
-  kind: "agent-key" | "operator-token",
-  keyId: string,
-  about: string,
-): Promise<void> {
-  const path = kind === "agent-key" ? "keys" : "tokens";
-  const data = await api<{ token: string }>("GET", `/api/admin/${path}/${keyId}/reveal`);
-  showCredential(kind, { token: data.token, about });
-}
 
 export function revealBlocker(row: {
   has_secret?: boolean;

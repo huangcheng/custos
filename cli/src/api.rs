@@ -275,7 +275,6 @@ impl Client {
         self.request(Method::GET, class, path, None, None).await
     }
 
-
     pub async fn post(
         &self,
         class: RouteClass,
