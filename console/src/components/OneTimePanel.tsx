@@ -56,7 +56,7 @@ export function OneTimePanel({
         {titles[oneTime.kind][oneTime.retrievable ? "revealed" : "mint"]} for{" "}
         <span className="mono">{oneTime.about}</span>{" "}
         {oneTime.retrievable
-          ? "— copy it now; you can re-reveal it later with a step-up."
+          ? "— copy it now; you can re-reveal it later from the inventory."
           : "— shown once. Copy it now; it is not retrievable after you dismiss this panel."}
       </Notice>
       {error ? <Notice kind="error">{error}</Notice> : null}

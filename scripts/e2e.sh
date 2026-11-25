@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # e2e.sh — API + admin + remote-MCP end-to-end gate (design §11).
 # Throwaway postgres + app via compose; fake secrets generated per run.
-# Keys are minted through the REAL admin flow (setup → login → step-up →
+# Keys are minted through the REAL admin flow (setup → login →
 # POST /api/admin/keys); revocation goes through DELETE /api/admin/keys.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -163,10 +163,10 @@ step_up() {
     -d '{"password":"cu-test-e2e-password"}' \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["step_up_token"])'
 }
+# rev 39: mint trusts the login — session only, no step-up header
 mint_key() { # label
-  local su; su=$(step_up)
   curl -fsS -m 10 -b "$RUN_DIR/cookies" -X POST "$BASE/api/admin/keys" \
-    -H "x-csrf-token: $CSRF" -H "x-step-up-token: $su" -H 'content-type: application/json' \
+    -H "x-csrf-token: $CSRF" -H 'content-type: application/json' \
     -d "{\"label\":\"$1\"}"
 }
 # rev 38: every key has full access — no mode/scopes anywhere. The three keys
@@ -182,16 +182,31 @@ with open(path, "w") as f:
     json.dump({"first": first["token"], "second": second["token"],
                "third": third["token"], "first_key_id": first["key_id"]}, f)
 PYEOF
-# session-only gate: an operator token can never mint keys (403 before state)
-SU=$(step_up)
+# session-only gate: an operator token can never mint keys (403 before state).
+# Token mint itself trusts the login (rev 39): session alone.
 CO_JSON=$(curl -fsS -m 10 -b "$RUN_DIR/cookies" -X POST "$BASE/api/admin/tokens" \
-  -H "x-csrf-token: $CSRF" -H "x-step-up-token: $SU" -H 'content-type: application/json' \
+  -H "x-csrf-token: $CSRF" -H 'content-type: application/json' \
   -d "{\"label\":\"e2e-co\",\"allow_sensitive\":true,\"expires_at\":\"$(python3 -c 'from datetime import UTC,datetime,timedelta; print((datetime.now(UTC)+timedelta(days=7)).isoformat())')\"}")
 CO=$(printf '%s' "$CO_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+# a sensitive mint now needs no step-up: pin that it stays attributable
+TAUDIT_MINT=$(curl -fsS -m 10 "$BASE/api/admin/audit?action=token.mint" \
+  -H "Authorization: Bearer $CO")
+printf '%s' "$TAUDIT_MINT" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert any(x["ok"] and x["detail"].get("allow_sensitive") for x in d["items"]), \
+    "token.mint audit must record allow_sensitive"
+' || fail "token.mint audit row must record allow_sensitive"
 S=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$BASE/api/admin/keys" \
   -H "Authorization: Bearer $CO" -H 'content-type: application/json' \
   -d '{"label":"x"}')
 [ "$S" = "403" ] || fail "token mint must 403 session_required, got $S"
+# mirror the negative for POST /tokens: with step-up gone, letting an
+# allow_sensitive token mint another token is the top escalation path
+S=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$BASE/api/admin/tokens" \
+  -H "Authorization: Bearer $CO" -H 'content-type: application/json' \
+  -d "{\"label\":\"x\",\"allow_sensitive\":true,\"expires_at\":\"$(python3 -c 'from datetime import UTC,datetime,timedelta; print((datetime.now(UTC)+timedelta(days=1)).isoformat())')\"}")
+[ "$S" = "403" ] || fail "token-mints-token must 403 session_required, got $S"
 # masked admin get + audit read via the operator token
 MASKED=$(curl -fsS -m 10 "$BASE/api/admin/items" -H "Authorization: Bearer $CO")
 printf '%s' "$MASKED" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "items" in d' || fail "admin list"
@@ -215,15 +230,9 @@ assert status == sys.argv[1], f"status {status} != {sys.argv[1]}: {body}"
 assert json.loads(body)["code"] == sys.argv[2], body
 ' "$2" "$3"
 }
-# no step-up -> 401 step_up_required
-_R=$(curl -s -m 10 -w '\n%{http_code}' -b "$RUN_DIR/cookies" \
-  "$BASE/api/admin/keys/$RW_KEY_ID_EARLY/reveal" -H "x-csrf-token: $CSRF")
-assert_err "$_R" 401 step_up_required || fail "reveal without step-up must be 401 step_up_required, got $_R"
-# session + step-up -> the exact minted token
-SU=$(step_up)
+# the session alone reveals (rev 39: no step-up) -> the exact minted token
 REVEALED=$(curl -fsS -m 10 -b "$RUN_DIR/cookies" \
-  "$BASE/api/admin/keys/$RW_KEY_ID_EARLY/reveal" \
-  -H "x-csrf-token: $CSRF" -H "x-step-up-token: $SU")
+  "$BASE/api/admin/keys/$RW_KEY_ID_EARLY/reveal" -H "x-csrf-token: $CSRF")
 printf '%s' "$REVEALED" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
@@ -246,11 +255,10 @@ assert_err "$_R" 403 session_required || fail "token reveal via bearer must be 4
 _R=$(curl -s -m 10 -w '\n%{http_code}' \
   "$BASE/api/admin/keys/$RW_KEY_ID_EARLY/reveal" -H "Authorization: Bearer $CO")
 assert_err "$_R" 403 session_required || fail "key reveal via bearer must be 403 session_required, got $_R"
-# operator-token reveal round-trip (session + step-up)
-SU=$(step_up)
+# operator-token reveal round-trip (session alone, rev 39)
 TREVEALED=$(curl -fsS -m 10 -b "$RUN_DIR/cookies" \
   "$BASE/api/admin/tokens/$CO_KEY_ID/reveal" \
-  -H "x-csrf-token: $CSRF" -H "x-step-up-token: $SU")
+  -H "x-csrf-token: $CSRF")
 printf '%s' "$TREVEALED" | python3 -c '
 import json, sys
 assert json.load(sys.stdin)["token"] == sys.argv[1], "token reveal round-trip"
@@ -493,6 +501,18 @@ BEFORE_AUTHFAIL=$(docker exec "$PROJECT-db-1" psql -U custos -d custos -tAc \
 BEFORE_AUDITFAIL=$(docker exec "$PROJECT-db-1" psql -U custos -d custos -tAc \
   "SELECT count(*) FROM audit WHERE action='auth.failure' AND ok=false;")
 RW_KEY_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["first_key_id"])' "$RUN_DIR/tokens.json")
+# rev 39 split: mint/reveal are session-only, revoke KEEPS the step-up —
+# prove the negative half for both credential kinds, with the closed code
+# (a bare 401 could also be a dead session and would prove nothing)
+_REV=$(curl -s -m 10 -w '\n%{http_code}' -b "$RUN_DIR/cookies" \
+  -X DELETE "$BASE/api/admin/keys/$RW_KEY_ID" -H "x-csrf-token: $CSRF")
+assert_err "$_REV" 401 step_up_required \
+  || fail "key revoke without step-up must be 401 step_up_required, got $_REV"
+CO_REVOKE_ID="$CO_KEY_ID"  # same token, one extraction (defined above)
+_REV=$(curl -s -m 10 -w '\n%{http_code}' -b "$RUN_DIR/cookies" \
+  -X DELETE "$BASE/api/admin/tokens/$CO_REVOKE_ID" -H "x-csrf-token: $CSRF")
+assert_err "$_REV" 401 step_up_required \
+  || fail "token revoke without step-up must be 401 step_up_required, got $_REV"
 SU=$(step_up)
 REV=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -b "$RUN_DIR/cookies" \
   -X DELETE "$BASE/api/admin/keys/$RW_KEY_ID" \

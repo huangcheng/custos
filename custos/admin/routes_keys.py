@@ -1,13 +1,15 @@
 """Admin key/token management (design §6, plan 3).
 
-Mint/revoke are session+step-up ONLY (require_session_only 403s any
-token before state checks). Inventories are plain admin reads but
+Mint/reveal are session-only — no step-up (rev 39 operator decision); revoke
+stays session+step-up. Every one of them 403s a bearer token before state
+checks (require_session*), so credential acquisition stays interactive.
+Inventories are plain admin reads but
 audited (key.list/token.list — reconnaissance leaves a trace, §4).
 Token revocation cascade-deletes bound unconsumed step-up/run rows in
 the same transaction (§5); success audits commit WITH the mutation.
 
 Minted tokens are ALSO sealed under the keyring (AAD key:/token: domains)
-so the operator can re-reveal them later through the session+step-up-only
+so the operator can re-reveal them later through the session-only
 reveal routes (key.reveal/token.reveal, audited). Credential acquisition
 stays interactive — no bearer path, the same invariant as mint/revoke.
 The digest remains the sole authentication primitive; pre-0002 rows have
@@ -23,7 +25,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import delete, select
 
-from custos.admin.auth import AdminPrincipal, require_admin, require_session_only
+from custos.admin.auth import (
+    AdminPrincipal,
+    require_admin,
+    require_session_no_step_up,
+    require_session_only,
+)
 from custos.audit import add_audit_row, record_audit
 from custos.crypto import UnreadableError
 from custos.db.models import AgentKey, OperatorToken, StepUpToken
@@ -72,7 +79,7 @@ def _audit_in_txn(
 
 @router.post("/keys", status_code=201)
 async def mint_key(
-    request: Request, p: AdminPrincipal = Depends(require_session_only)
+    request: Request, p: AdminPrincipal = Depends(require_session_no_step_up)
 ) -> dict[str, Any]:
     body = await _json_body(request)
     # a caller that still sends the removed access-model fields must be told,
@@ -150,7 +157,7 @@ async def revoke_key(
 
 @router.post("/tokens", status_code=201)
 async def mint_token(
-    request: Request, p: AdminPrincipal = Depends(require_session_only)
+    request: Request, p: AdminPrincipal = Depends(require_session_no_step_up)
 ) -> dict[str, Any]:
     body = await _json_body(request)
     label = _label(body)
@@ -237,7 +244,7 @@ async def revoke_token(
 async def _reveal_credential(
     request: Request, p: AdminPrincipal, key_id: str, *, domain: str, action: str
 ) -> dict[str, Any]:
-    """Session+step-up-gated re-reveal of a minted credential (§5). Read-path
+    """Session-gated (no step-up, rev 39) re-reveal of a minted credential (§5). Read-path
     ordering: the success audit commits BEFORE the token leaves; a ledger
     failure withholds the value (fail closed, parity with item reveal).
     Revoked credentials and pre-0002 digest-only rows are never revealed."""
@@ -299,7 +306,7 @@ async def _reveal_credential(
 @router.get("/keys/{key_id}/reveal")
 async def reveal_key(
     key_id: str, request: Request,
-    p: AdminPrincipal = Depends(require_session_only),
+    p: AdminPrincipal = Depends(require_session_no_step_up),
 ) -> dict[str, Any]:
     return await _reveal_credential(request, p, key_id, domain="key", action="key.reveal")
 
@@ -307,6 +314,6 @@ async def reveal_key(
 @router.get("/tokens/{key_id}/reveal")
 async def reveal_token(
     key_id: str, request: Request,
-    p: AdminPrincipal = Depends(require_session_only),
+    p: AdminPrincipal = Depends(require_session_no_step_up),
 ) -> dict[str, Any]:
     return await _reveal_credential(request, p, key_id, domain="token", action="token.reveal")

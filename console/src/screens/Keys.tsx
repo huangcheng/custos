@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, status } from "../api";
-import { useOneTime } from "../onetime";
+import { showCredential } from "../onetime";
 import { Button, Notice, TextField } from "../components/Field";
 import { ConfirmStepUp } from "../components/ConfirmStepUp";
 import { Drawer } from "../components/Drawer";
@@ -10,6 +10,7 @@ import {
   expiryLabel,
   mintKeyBody,
   revealBlocker,
+  revealCredential,
   type KeyForm,
 } from "../keys";
 import { truncate } from "../plain";
@@ -28,14 +29,13 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
   const [busy, setBusy] = useState(false);
   // the mint form lives in a drawer opened from the page header button
   const [minting, setMinting] = useState(false);
+  // read-at-failure-time view of the same fact: a mint that fails AFTER the
+  // operator closed the drawer must surface on the page, not inside it
+  const drawerOpen = useRef(false);
+  const [mintBusy, setMintBusy] = useState(false);
   const [totpRequired, setTotpRequired] = useState(false);
   const [pending, setPending] = useState<null | ((token: string) => Promise<void>)>(null);
-  // where a pending step-up's failure must land — carried with the operation
-  // at issue time, never inferred from which drawer happens to be open
-  const [pendingSink, setPendingSink] = useState<"mint" | null>(null);
   const [confirm, setConfirm] = useState<null | { title: string; message: string }>(null);
-  const oneTime = useOneTime();
-
   const load = useCallback(async () => {
     try {
       const data = await api<{ keys: KeyRow[] }>("GET", "/api/admin/keys");
@@ -58,46 +58,46 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
       });
   }, [load]);
 
-  const mint = () => {
+  // mint and reveal trust the login (rev 39): no step-up, just the session.
+  // `mintBusy` is deliberately separate from the row-action `busy`: a mint
+  // left in flight after the drawer closes must not disable the inventory.
+  const mint = async () => {
     setMintError("");
-    setConfirm(null);
+    setError("");
+    let body: Record<string, unknown>;
     try {
-      const body = mintKeyBody(form);
-      setPendingSink("mint");
-      setPending(() => async (token: string) => {
-        setBusy(true);
-        try {
-          const data = await api<MintedKey>("POST", "/api/admin/keys", body, {
-            stepUpToken: token,
-          });
-          // store it above the screens: a sidebar click must not destroy it;
-          // key_id in `about` keeps distinct mints from colliding in the queue
-          oneTime.show({
-            kind: "agent-key",
-            value: data.token,
-            about: credentialAbout(data),
-            retrievable: true,
-          });
-          setForm(BLANK);
-          setMintError("");
-          setMinting(false);
-          await load();
-        } finally {
-          setBusy(false);
-        }
-      });
+      body = mintKeyBody(form);
     } catch (err) {
       setMintError(err instanceof KeyFormError ? err.message : "invalid form");
+      return;
+    }
+    setMintBusy(true);
+    try {
+      const data = await api<MintedKey>("POST", "/api/admin/keys", body);
+      // store it above the screens: a sidebar click must not destroy it;
+      // key_id in `about` keeps distinct mints from colliding in the queue
+      showCredential("agent-key", { token: data.token, about: credentialAbout(data) });
+      setForm(BLANK);
+      setMintError("");
+      drawerOpen.current = false; // dismissed programmatically: keep the ref honest
+      setMinting(false);
+      await load();
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "mint failed";
+      // the drawer may have been closed while the request was in flight
+      if (drawerOpen.current) setMintError(message);
+      else setError(message);
+    } finally {
+      setMintBusy(false);
     }
   };
 
   const closeMint = () => {
+    // closing mid-flight is safe: the result lands in the global one-time
+    // panel regardless of this drawer (a failure then surfaces on the page)
+    drawerOpen.current = false;
     setMintError("");
     setMinting(false);
-    // an open step-up belongs to the drawer that launched it: closing the
-    // drawer cancels it (ConfirmStepUp's unmount flag withholds any token)
-    setPending(null);
-    setPendingSink(null);
   };
 
   const revoke = (keyId: string) => {
@@ -113,25 +113,17 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
     });
   };
 
-  const reveal = (row: KeyRow) => {
+  const reveal = async (row: KeyRow) => {
     setConfirm(null);
     setError("");
-    setPending(() => async (token: string) => {
-      setBusy(true);
-      try {
-        const data = await api<{ token: string }>(
-          "GET", `/api/admin/keys/${row.key_id}/reveal`, undefined, { stepUpToken: token },
-        );
-        oneTime.show({
-          kind: "agent-key",
-          value: data.token,
-          about: credentialAbout(row),
-          retrievable: true,
-        });
-      } finally {
-        setBusy(false);
-      }
-    });
+    setBusy(true);
+    try {
+      await revealCredential("agent-key", row.key_id, credentialAbout(row));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "reveal failed");
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -140,18 +132,20 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
         <div>
           <h1 className="page-title">Keys</h1>
           <p className="page-sub">
-            Agent credentials. The full token is shown at mint and can be re-revealed later with a
-            step-up.
+            Agent credentials. The full token is shown at mint and can be re-revealed from the
+            inventory.
           </p>
         </div>
         <span className="row-end" />
         <Button
           label="Mint key"
           variant="primary"
-          disabled={busy || minting}
+          disabled={mintBusy || minting}
           onClick={() => {
             setForm(BLANK);
             setMintError("");
+            setError("");
+            drawerOpen.current = true;
             setMinting(true);
           }}
         />
@@ -163,22 +157,20 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
           meta="Full-authority agent credential"
           onClose={closeMint}
         >
-          {/* the whole form goes inert while a step-up is open: neither dialog
-              traps focus, so a live form behind the overlay could re-run mint
-              with a label edited behind the prompt */}
           <form
+            className="stack"
             onSubmit={(event) => {
               event.preventDefault();
               void mint();
             }}
           >
-            <fieldset className="stack" disabled={pending !== null}>
             {mintError ? <Notice kind="error">{mintError}</Notice> : null}
             <TextField
               label="Label"
               value={form.label}
               onChange={(next) => setForm((prev) => ({ ...prev, label: next }))}
               hint="Every key can read and modify all items — mint sparingly and set an expiry."
+              disabled={mintBusy}
               autoFocus
             />
             <TextField
@@ -186,12 +178,12 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
               value={form.expiresAt}
               onChange={(next) => setForm((prev) => ({ ...prev, expiresAt: next }))}
               hint="ISO 8601 or a date input; blank means no expiry"
+              disabled={mintBusy}
             />
             <div className="row">
-              <Button label="Mint key" variant="primary" type="submit" disabled={busy} />
+              <Button label="Mint key" variant="primary" type="submit" disabled={mintBusy} />
               <Button label="Cancel" variant="ghost" onClick={closeMint} />
             </div>
-            </fieldset>
           </form>
         </Drawer>
       ) : null}
@@ -223,7 +215,7 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
                     <span title={blocker}>
                       <Button
                         label="Reveal"
-                        onClick={() => reveal(row)}
+                        onClick={() => void reveal(row)}
                         disabled={busy || blocker !== undefined}
                       />
                     </span>{" "}
@@ -248,22 +240,15 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
           message={confirm?.message}
           onCancel={() => {
             setPending(null);
-            setPendingSink(null);
             setConfirm(null);
           }}
           onToken={async (token) => {
             const run = pending;
-            const sink = pendingSink;
             setPending(null);
-            setPendingSink(null);
             try {
               await run(token);
             } catch (err) {
-              // the sink is decided at issue time: a mint failure lands in the
-              // drawer it came from, everything else is a page-level notice
-              const message = err instanceof ApiError ? err.message : "action failed";
-              if (sink === "mint") setMintError(message);
-              else setError(message);
+              setError(err instanceof ApiError ? err.message : "action failed");
             }
           }}
         />

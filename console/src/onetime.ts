@@ -48,6 +48,17 @@ export function clearOneTime(): void {
   emit();
 }
 
+/** Minted and re-revealed credentials share one panel shape. Both are
+ *  retrievable — re-reveal needs only the session (rev 39) — so this is the
+ *  single place that decides the panel's kind/metadata policy (it writes the
+ *  module store directly: no caller-supplied sink can bypass it). */
+export function showCredential(
+  kind: "agent-key" | "operator-token",
+  credential: { token: string; about: string },
+): void {
+  setOneTime({ kind, value: credential.token, about: credential.about, retrievable: true });
+}
+
 /** Session boundary: never leave secret material in module memory. */
 export function clearOneTimeForSignOut(): void {
   clearOneTime();

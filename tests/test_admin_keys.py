@@ -64,19 +64,23 @@ async def test_mint_revoke_session_only(admin_stack) -> None:
             rows = (await s.execute(select(AuditRow).where(
                 AuditRow.action == "auth.failure"))).scalars().all()
         assert sum(r.detail.get("reason") == "session_required" for r in rows) == 4
-        # session without step-up → 401; step-up single-use
+        # rev 39: mint (keys AND tokens) needs only the session — no step-up
         csrf = await h["login"](client)
         hdr = {"x-csrf-token": csrf}
-        r = await client.post("/api/admin/keys", headers=hdr,
-                              json={"label": "x"})
+        r = await client.post("/api/admin/keys", headers=hdr, json={"label": "x"})
+        assert r.status_code == 201, r.text
+        minted_key = r.json()["key_id"]
+        r = await client.post("/api/admin/tokens", headers=hdr,
+                              json={"label": "x", "expires_at": _iso(1)})
+        assert r.status_code == 201, r.text
+        # revoke (delete) still requires the step-up; single-use
+        r = await client.delete(f"/api/admin/keys/{minted_key}", headers=hdr)
         assert r.status_code == 401
         su = await h["step_up"](client, csrf)
         hdr_su = {**hdr, "x-step-up-token": su}
-        r = await client.post("/api/admin/keys", headers=hdr_su,
-                              json={"label": "x"})
-        assert r.status_code == 201
-        r = await client.post("/api/admin/keys", headers=hdr_su,
-                              json={"label": "y"})
+        r = await client.delete(f"/api/admin/keys/{minted_key}", headers=hdr_su)
+        assert r.status_code == 204
+        r = await client.delete(f"/api/admin/keys/{minted_key}", headers=hdr_su)
         assert r.status_code == 401  # consumed exactly once
 
 

@@ -103,10 +103,12 @@ async def test_key_mint_seals_and_reveal_roundtrip(admin_stack) -> None:
 async def test_reveal_gates(admin_stack) -> None:
     async with admin_stack() as (client, maker, h):
         csrf = await h["login"](client)
-        key_id = (await _mint_key(client, h, csrf, "cu-test-gates"))["key_id"]
-        # session without step-up -> 401 step_up_required
+        minted = await _mint_key(client, h, csrf, "cu-test-gates")
+        key_id = minted["key_id"]
+        # rev 39: the session alone reveals — no step-up header at all
         r = await client.get(f"/api/admin/keys/{key_id}/reveal", headers=hdr(csrf))
-        assert r.status_code == 401 and r.json()["code"] == "step_up_required"
+        assert r.status_code == 200, r.text
+        assert r.json()["token"] == minted["token"]
         # bearer requests must NOT carry the session cookie (cookie XOR bearer)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=h["app"]), base_url="http://test"
@@ -118,9 +120,8 @@ async def test_reveal_gates(admin_stack) -> None:
             sensitive = await h["mint_co"](allow_sensitive=True)
             r = await bc.get(f"/api/admin/keys/{key_id}/reveal", headers=bearer(sensitive))
             assert r.status_code == 403 and r.json()["code"] == "session_required"
-        # unknown key -> 404, audited ok:false
-        su = await h["step_up"](client, csrf)
-        r = await client.get("/api/admin/keys/000000000000/reveal", headers=hdr(csrf, su))
+        # unknown key -> 404, audited ok:false (session alone)
+        r = await client.get("/api/admin/keys/000000000000/reveal", headers=hdr(csrf))
         assert r.status_code == 404
 
 

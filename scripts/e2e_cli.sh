@@ -182,7 +182,8 @@ check "a value containing CR round-trips byte-for-byte" \
 
 
 KEY_MINT_LOG="$RUN_DIR/key-mint.log"
-if ! printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" \
+# rev 39: mint trusts the login — no password prompt
+if ! docker exec -e XDG_CONFIG_HOME="$CLI_HOME" \
       "$PROJECT-app-1" custos --url http://127.0.0.1:8300 \
       key mint --label cli-e2e-key \
       > "$KEY_MINT_LOG" 2> "$RUN_DIR/key-mint.err"; then
@@ -195,7 +196,7 @@ check "minted token authenticates on the agent plane" \
   'curl -fsS -m 5 -H "Authorization: Bearer $KEY" "$BASE/api/items" | grep -q "\"name\""'
 KEY_ID=$(printf '%s' "$KEY" | sed 's/^cu-//; s/\..*//')
 # revealable credentials (rev 37): re-reveal the exact minted token via the CLI
-printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
   custos --url http://127.0.0.1:8300 key reveal "$KEY_ID" > "$RUN_DIR/key-reveal.log" 2> "$RUN_DIR/key-reveal.err" \
   || { cat "$RUN_DIR/key-reveal.log" "$RUN_DIR/key-reveal.err" >&2; fail "key reveal"; }
 check "key reveal returns the exact minted token" \
@@ -204,7 +205,7 @@ check "key reveal returns the exact minted token" \
 # reveal must refuse and print no token
 docker exec "$PROJECT-db-1" psql -U custos -d custos -c \
   "UPDATE agent_keys SET secret_ciphertext = NULL, secret_key_version = NULL WHERE key_id = '$KEY_ID'" >/dev/null
-if printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+if docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
   custos --url http://127.0.0.1:8300 key reveal "$KEY_ID" \
   > "$RUN_DIR/key-reveal-legacy.log" 2> "$RUN_DIR/key-reveal-legacy.err"; then
   fail "reveal of a legacy digest-only key must fail"
@@ -214,7 +215,7 @@ check "legacy refusal is the digest-only conflict, and prints no token" \
 # corrupt sealed copy under an available version: reveal must withhold the value
 docker exec "$PROJECT-db-1" psql -U custos -d custos -c \
   "UPDATE agent_keys SET secret_ciphertext = decode(repeat('00', 48), 'hex'), secret_key_version = 1 WHERE key_id = '$KEY_ID'" >/dev/null
-if printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+if docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
   custos --url http://127.0.0.1:8300 key reveal "$KEY_ID" \
   > "$RUN_DIR/key-reveal-corrupt.log" 2> "$RUN_DIR/key-reveal-corrupt.err"; then
   fail "reveal of a corrupt sealed copy must fail"
@@ -230,7 +231,7 @@ printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-ap
   || { cat "$RUN_DIR/revoke.log" >&2; fail "key revoke"; }
 check "a revoked (deleted) key 401s on the next request" \
   '[ "$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $KEY" "$BASE/api/items")" = "401" ]'
-if printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+if docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
   custos --url http://127.0.0.1:8300 key reveal "$KEY_ID" > "$RUN_DIR/key-reveal-revoked.log" 2> "$RUN_DIR/key-reveal-revoked.err"; then
   fail "reveal of a deleted key must fail"
 fi
@@ -238,14 +239,14 @@ check "deleted-key refusal is a plain not-found (row is gone)" \
   'grep -q "not_found: not found" "$RUN_DIR/key-reveal-revoked.err"'
 
 echo "== session-only routes refuse an env token"
-S=$(printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+S=$(docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
       custos --url http://127.0.0.1:8300 token mint --label cli-e2e-token \
       --expires "$(python3 -c 'from datetime import UTC,datetime,timedelta; print((datetime.now(UTC)+timedelta(days=1)).isoformat())')" \
       2>/dev/null | head -1)
 case "$S" in co-*) : ;; *) fail "token mint returned no token";; esac
 # revealable credentials (rev 37): operator-token re-reveal round-trip
 TOK_ID=$(printf '%s' "$S" | sed 's/^co-//; s/\..*//')
-printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
   custos --url http://127.0.0.1:8300 token reveal "$TOK_ID" > "$RUN_DIR/token-reveal.log" 2> "$RUN_DIR/token-reveal.err" \
   || { cat "$RUN_DIR/token-reveal.log" "$RUN_DIR/token-reveal.err" >&2; fail "token reveal"; }
 check "token reveal returns the exact minted token" \
@@ -310,7 +311,7 @@ check "rekey --verify exited clean (no unreadable rows)" '[ -s "$RUN_DIR/verify.
 check "rekey --verify reported no corruption" '! grep -qi "unreadable\|skipped" "$RUN_DIR/verify.log"'
 # the sweep re-sealed the token's sealed copy under the new version/AAD:
 # it must STILL reveal the exact minted token (unrevoked until reset-mfa)
-printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
   custos --url http://127.0.0.1:8300 token reveal "$TOK_ID" \
   > "$RUN_DIR/token-reveal-postrekey.log" 2> "$RUN_DIR/token-reveal-postrekey.err" \
   || { cat "$RUN_DIR/token-reveal-postrekey.log" "$RUN_DIR/token-reveal-postrekey.err" >&2; fail "post-rekey token reveal"; }

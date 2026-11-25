@@ -275,15 +275,6 @@ impl Client {
         self.request(Method::GET, class, path, None, None).await
     }
 
-    pub async fn get_step_up(
-        &self,
-        class: RouteClass,
-        path: &str,
-        step_up: &str,
-    ) -> Result<Value, CliError> {
-        self.request(Method::GET, class, path, None, Some(step_up))
-            .await
-    }
 
     pub async fn post(
         &self,

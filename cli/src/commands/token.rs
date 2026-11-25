@@ -8,7 +8,7 @@ use crate::CliError;
 
 #[derive(Subcommand)]
 pub enum TokenCommand {
-    /// Mint an operator token (session + step-up; expiry is mandatory).
+    /// Mint an operator token (session only — rev 39; expiry is mandatory).
     Mint {
         #[arg(long)]
         label: String,
@@ -21,7 +21,7 @@ pub enum TokenCommand {
     Ls,
     /// Revoke a token (session + step-up).
     Revoke { key_id: String },
-    /// Re-reveal a minted token's full value (session + step-up).
+    /// Re-reveal a minted token's full value (session only — rev 39, no step-up).
     Reveal { key_id: String },
 }
 
@@ -32,19 +32,14 @@ pub async fn run(client: &Client, cmd: TokenCommand, as_json: bool) -> Result<()
             expires,
             allow_sensitive,
         } => {
-            let step_up = super::key::prompt_step_up(client).await?;
+            // rev 39: mint trusts the login — no step-up prompt
             let body = json!({
                 "label": label,
                 "expires_at": expires,
                 "allow_sensitive": allow_sensitive,
             });
             let out = client
-                .post(
-                    RouteClass::SessionOnly,
-                    "/api/admin/tokens",
-                    Some(body),
-                    Some(&step_up),
-                )
+                .post(RouteClass::SessionOnly, "/api/admin/tokens", Some(body), None)
                 .await?;
             match out.get("token").and_then(Value::as_str) {
                 Some(token) => {
@@ -77,12 +72,11 @@ pub async fn run(client: &Client, cmd: TokenCommand, as_json: bool) -> Result<()
             println!("revoked {key_id}");
         }
         TokenCommand::Reveal { key_id } => {
-            let step_up = super::key::prompt_step_up(client).await?;
+            // rev 39: reveal trusts the login — no step-up prompt
             let out = client
-                .get_step_up(
+                .get(
                     RouteClass::SessionOnly,
                     &format!("/api/admin/tokens/{}/reveal", Client::seg(&key_id)),
-                    &step_up,
                 )
                 .await?;
             match out.get("token").and_then(Value::as_str) {

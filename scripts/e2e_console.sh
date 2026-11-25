@@ -482,18 +482,6 @@ await page.evaluate(() => {
   set(label, "cu-test-console-key");
 });
 await clickWhenReady("^Mint key$", ".drawer form", "submit the mint form");
-// the mint drawer stays mounted under the step-up overlay, so the step-up
-// prompt must be located by its own form class, not ".scrim form"
-await until(() => page.evaluate(() => !!document.querySelector("form.drawer")), "the mint step-up prompt");
-await page.evaluate(({ pw }) => {
-  const prompt = document.querySelector("form.drawer");
-  const setter = Object.getOwnPropertyDescriptor(
-    window.HTMLInputElement.prototype, "value").set;
-  const pwInput = prompt.querySelector('input[type="password"]');
-  setter.call(pwInput, pw);
-  pwInput.dispatchEvent(new Event("input", { bubbles: true }));
-  [...prompt.querySelectorAll("button")].find((b) => /Continue/i.test(b.textContent)).click();
-}, { pw: PW });
 // the one-time token card appears with a cu-… value, and the label is listed
 const MINTED_KEY = await (async () => {
   await until(
@@ -511,6 +499,12 @@ const MINTED_KEY = await (async () => {
   });
 })();
 ok(MINTED_KEY.startsWith("cu-"), "mint shows the token");
+// checked AFTER the panel is visible: a step-up regression would have
+// opened its prompt instead of the panel, so this cannot pass vacuously
+ok(
+  await page.evaluate(() => !document.querySelector("form.drawer")),
+  "mint needs no step-up prompt (rev 39)",
+);
 ok(
   await page.evaluate(
     () => !!document.querySelector('[data-testid="one-time-panel"]'),
@@ -548,7 +542,8 @@ ok(
   "the inventory/UI never embeds the secret after a reload (text, inputs, attributes)",
 );
 
-// 7c. re-reveal: the row's Reveal button + step-up returns the SAME token
+// 7c. re-reveal: the row's Reveal button returns the SAME token on the
+// session alone (rev 39 — no step-up)
 await page.evaluate(() => {
   const row = [...document.querySelectorAll("tr")].find((r) =>
     r.textContent.includes("cu-test-console-key"));
@@ -557,16 +552,6 @@ await page.evaluate(() => {
   if (!btn || btn.disabled) throw new Error("Reveal button missing or disabled");
   btn.click();
 });
-await until(() => page.evaluate(() => !!document.querySelector(".scrim form")), "the reveal step-up prompt");
-await page.evaluate(({ pw }) => {
-  const prompt = document.querySelector(".scrim form");
-  const setter = Object.getOwnPropertyDescriptor(
-    window.HTMLInputElement.prototype, "value").set;
-  const pwInput = prompt.querySelector('input[type="password"]');
-  setter.call(pwInput, pw);
-  pwInput.dispatchEvent(new Event("input", { bubbles: true }));
-  [...prompt.querySelectorAll("button")].find((b) => /Continue/i.test(b.textContent)).click();
-}, { pw: PW });
 await until(
   () => page.evaluate(({ key }) => {
     const panel = document.querySelector('[data-testid="one-time-panel"]');
@@ -575,7 +560,11 @@ await until(
   }, { key: MINTED_KEY }),
   "the re-revealed token panel",
 );
-ok(true, "Reveal + step-up returns the exact minted token");
+ok(
+  await page.evaluate(() => !document.querySelector("form.drawer")),
+  "Reveal needs no step-up prompt (rev 39)",
+);
+ok(true, "Reveal returns the exact minted token");
 ok(
   await page.evaluate(() => {
     const text = document.querySelector('[data-testid="one-time-panel"]').textContent ?? "";
@@ -855,26 +844,35 @@ let recoveryCodes = [];
     "advance + empty guard + success burned no lockout rows; wrong code burned one",
   );
   // a console step-up WITH the TOTP factor: ConfirmStepUp must render the
-  // authenticator field (totpRequired prop) and the reveal must succeed
+  // authenticator field (totpRequired prop) and the destructive Delete must
+  // succeed (rev 39: Delete keeps its step-up; mint/reveal do not)
   await page.goto(`${BASE}/keys`);
   await until(() => page.evaluate(() =>
-    [...document.querySelectorAll("button")].some((b) => /^Reveal$/i.test(b.textContent))),
-    "keys inventory with Reveal");
-  await clickWhenReady("^Reveal$", null, "reveal with TOTP step-up");
-  await until(() => page.evaluate(() => !!document.querySelector(".scrim form")), "reveal step-up");
+    [...document.querySelectorAll("button")].some((b) => /^Delete$/i.test(b.textContent))),
+    "keys inventory with Delete");
+  await page.evaluate(() => {
+    const row = [...document.querySelectorAll("tr")].find((r) =>
+      r.textContent.includes("cu-test-console-key"));
+    if (!row) throw new Error("key row not found");
+    const btn = [...row.querySelectorAll("button")].find((b) => /^Delete$/.test(b.textContent));
+    if (!btn || btn.disabled) throw new Error("Delete button missing or disabled");
+    btn.click();
+  });
+  await until(() => page.evaluate(() => !!document.querySelector(".scrim form")), "delete step-up");
   await until(() => page.evaluate(() =>
     (document.querySelector(".scrim form")?.textContent || "").includes("Authenticator code")),
     "the step-up dialog to ask for the TOTP factor");
-  ok(true, "the step-up dialog asks for the TOTP factor when enabled");
+  ok(
+    await page.evaluate(() =>
+      (document.querySelector(".scrim form")?.textContent || "").includes("permanently destroys")),
+    "the step-up dialog asks for the TOTP factor and carries the destructive copy",
+  );
   await fillStepUp(PW, await stepupCode(totpSecret));
-  await clickWhenReady("^Continue$", ".scrim form", "reveal step-up continue");
+  await clickWhenReady("^Continue$", ".scrim form", "delete step-up continue");
   await until(() => page.evaluate(() =>
-    !!document.querySelector('[data-testid="one-time-panel"]')), "re-revealed token panel");
-  ok(true, "console reveal completes with a TOTP-gated step-up");
-  await page.evaluate(() => {
-    const panel = document.querySelector('[data-testid="one-time-panel"]');
-    [...panel.querySelectorAll("button")].find((b) => /I have stored it/i.test(b.textContent)).click();
-  });
+    ![...document.querySelectorAll("tr")].some((r) =>
+      r.textContent.includes("cu-test-console-key"))), "the deleted key row to disappear");
+  ok(true, "Delete completes with a TOTP-gated step-up and the row is gone");
 }
 
 // 12. TOTP-off recovery window: disabling TOTP leaves the issued codes live,

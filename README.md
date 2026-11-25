@@ -26,13 +26,14 @@ log, an audit row, or an error message.
 
 | | Authenticated by | Can do |
 |---|---|---|
-| **Agent plane** (`/api/items`, `/api/search`, `/mcp`) | agent key `cu-…` bearer | read/write items within scope; never admin operations |
+| **Agent plane** (`/api/items`, `/api/search`, `/mcp`) | agent key `cu-…` bearer | read/write every item; never admin operations |
 | **Admin plane** (`/api/admin/…`) | operator session + CSRF, or `co-…` bearer | everything, gated per route (see below) |
 
-Some admin routes are **session + step-up only** and refuse any token with
-`403 session_required` before looking at state: `purge`, `force-drop`,
-`retention`, minting/revoking keys or tokens, and re-revealing a minted
-key/token. Item reveal, history-reveal, admin env, rekey, and restore accept
+Minting a key or token and re-revealing one need only the logged-in session
+(no password re-prompt). Some admin routes are **session + step-up only** and
+refuse any token with `403 session_required` before looking at state: `purge`,
+`force-drop`, `retention`, and revoking/deleting keys or tokens. Item reveal,
+history-reveal, admin env, rekey, and restore accept
 an `allow_sensitive` token instead.
 
 ## Quick start

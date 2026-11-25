@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api } from "../api";
-import { useOneTime } from "../onetime";
+import { showCredential, useOneTime } from "../onetime";
 import { Button, Notice, TextField } from "../components/Field";
 import { ConfirmStepUp } from "../components/ConfirmStepUp";
-import { KeyFormError, credentialAbout, expiryLabel, revealBlocker, tokenExpiryBody } from "../keys";
+import {
+  KeyFormError,
+  credentialAbout,
+  expiryLabel,
+  revealBlocker,
+  revealCredential,
+  tokenExpiryBody,
+} from "../keys";
 import { decodeCreateOptions, encodeAttestation, type PublicKeyCredentialCreationOptionsJSON } from "../webauthn";
 import { truncate } from "../plain";
 import type {
@@ -421,12 +428,14 @@ function Account({
 
 function Tokens({ totpRequired }: { totpRequired: boolean }) {
   const [rows, setRows] = useState<TokenRow[]>([]);
-  const oneTime = useOneTime();
   const [label, setLabel] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
   const [allowSensitive, setAllowSensitive] = useState(false);
   const [error, setError] = useState("");
+  // `busy` belongs to the per-row reveal/revoke actions; a mint in flight
+  // must not disable them (and vice versa)
   const [busy, setBusy] = useState(false);
+  const [minting, setMinting] = useState(false);
   const [pending, setPending] = useState<null | ((token: string) => Promise<void>)>(null);
 
   const load = useCallback(async () => {
@@ -442,9 +451,49 @@ function Tokens({ totpRequired }: { totpRequired: boolean }) {
     void load();
   }, [load]);
 
+  // rev 39: mint and reveal trust the login — no step-up
+  const mint = async () => {
+    setError("");
+    let body: Record<string, unknown>;
+    try {
+      body = tokenExpiryBody({ label, allowSensitive, expiresAt });
+    } catch (err) {
+      setError(err instanceof KeyFormError ? err.message : "invalid form");
+      return;
+    }
+    setMinting(true);
+    try {
+      const data = await api<MintedToken>("POST", "/api/admin/tokens", body);
+      showCredential("operator-token", { token: data.token, about: credentialAbout(data) });
+      setLabel("");
+      setExpiresAt("");
+      setAllowSensitive(false);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "mint failed");
+    } finally {
+      setMinting(false);
+    }
+  };
+
+  const reveal = async (row: TokenRow) => {
+    setError("");
+    setBusy(true);
+    try {
+      await revealCredential("operator-token", row.key_id, credentialAbout(row));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "reveal failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="stack">
       {error ? <Notice kind="error">{error}</Notice> : null}
+      {/* inert while the mint POST is in flight: the form resets on success,
+          and nothing typed behind the request should be silently dropped */}
+      <fieldset className="stack" disabled={minting}>
       <div className="card stack">
         <h2 className="page-sub" style={{ margin: 0 }}>
           Mint an operator token
@@ -471,32 +520,12 @@ function Tokens({ totpRequired }: { totpRequired: boolean }) {
           <Button
             label="Mint token"
             variant="primary"
-            onClick={() => {
-              setError("");
-              try {
-                const body = tokenExpiryBody({ label, allowSensitive, expiresAt });
-                setPending(() => async (token: string) => {
-                  const data = await api<MintedToken>("POST", "/api/admin/tokens", body, {
-                    stepUpToken: token,
-                  });
-                  oneTime.show({
-                    kind: "operator-token",
-                    value: data.token,
-                    about: credentialAbout(data),
-                    retrievable: true,
-                  });
-                  setLabel("");
-                  setExpiresAt("");
-                  setAllowSensitive(false);
-                  await load();
-                });
-              } catch (err) {
-                setError(err instanceof KeyFormError ? err.message : "invalid form");
-              }
-            }}
+            disabled={minting}
+            onClick={() => void mint()}
           />
         </div>
       </div>
+      </fieldset>
       <div className="card" style={{ padding: 0 }}>
         {rows.length === 0 ? (
           <div className="empty">No operator tokens.</div>
@@ -534,26 +563,7 @@ function Tokens({ totpRequired }: { totpRequired: boolean }) {
                           <Button
                             label="Reveal"
                             disabled={busy || blocker !== undefined}
-                            onClick={() => {
-                              setError("");
-                              setPending(() => async (token: string) => {
-                                setBusy(true);
-                                try {
-                                  const data = await api<{ token: string }>(
-                                    "GET", `/api/admin/tokens/${row.key_id}/reveal`, undefined,
-                                    { stepUpToken: token },
-                                  );
-                                  oneTime.show({
-                                    kind: "operator-token",
-                                    value: data.token,
-                                    about: credentialAbout(row),
-                                    retrievable: true,
-                                  });
-                                } finally {
-                                  setBusy(false);
-                                }
-                              });
-                            }}
+                            onClick={() => void reveal(row)}
                           />
                         </span>{" "}
                         <Button

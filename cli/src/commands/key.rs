@@ -1,4 +1,5 @@
-//! `custos key` — agent keys. Mint/revoke are session + step-up only (§6).
+//! `custos key` — agent keys. Mint and reveal need only the session (rev 39);
+//! revoke keeps the interactive step-up (§6).
 
 use clap::Subcommand;
 use serde_json::{json, Value};
@@ -8,7 +9,7 @@ use crate::CliError;
 
 #[derive(Subcommand)]
 pub enum KeyCommand {
-    /// Mint an agent key (session + step-up). Every key has full access.
+    /// Mint an agent key (session only — rev 39). Every key has full access.
     Mint {
         #[arg(long)]
         label: String,
@@ -19,28 +20,23 @@ pub enum KeyCommand {
     Ls,
     /// Revoke a key (session + step-up; the key is deleted).
     Revoke { key_id: String },
-    /// Re-reveal a minted key's full token (session + step-up).
+    /// Re-reveal a minted key's full token (session only — rev 39, no step-up).
     Reveal { key_id: String },
 }
 
 pub async fn run(client: &Client, cmd: KeyCommand, as_json: bool) -> Result<(), CliError> {
     match cmd {
         KeyCommand::Mint { label, expires } => {
-            let token = prompt_step_up(client).await?;
+            // rev 39: mint trusts the login — no step-up prompt
             let mut body = json!({ "label": label });
             if let Some(expires) = expires {
                 body["expires_at"] = Value::String(expires);
             }
             let out = client
-                .post(
-                    RouteClass::SessionOnly,
-                    "/api/admin/keys",
-                    Some(body),
-                    Some(&token),
-                )
+                .post(RouteClass::SessionOnly, "/api/admin/keys", Some(body), None)
                 .await?;
             // Print the token, and only it, on stdout; it stays re-revealable
-            // through `custos key reveal` (sensitive-gated, audited).
+            // through `custos key reveal` (session only, audited — rev 39).
             match out.get("token").and_then(Value::as_str) {
                 Some(token) => {
                     if as_json {
@@ -85,12 +81,11 @@ pub async fn run(client: &Client, cmd: KeyCommand, as_json: bool) -> Result<(), 
             println!("revoked {key_id}");
         }
         KeyCommand::Reveal { key_id } => {
-            let token = prompt_step_up(client).await?;
+            // rev 39: reveal trusts the login — no step-up prompt
             let out = client
-                .get_step_up(
+                .get(
                     RouteClass::SessionOnly,
                     &format!("/api/admin/keys/{}/reveal", Client::seg(&key_id)),
-                    &token,
                 )
                 .await?;
             match out.get("token").and_then(Value::as_str) {

@@ -166,14 +166,28 @@ async def peek_step_up(request: Any, principal: AdminPrincipal) -> None:
     await _header_step_up(request, principal, consume=False)
 
 
-async def require_session_only(request: Request) -> AdminPrincipal:
+async def _require_interactive_session(request: Request) -> AdminPrincipal:
+    """The session-required half, shared by both session gates: §6 — the
+    gate fires BEFORE any state check, audited, uniform 403 for any token."""
     principal = await require_admin(request)
     if principal.actor_kind != "operator_session":
-        # §6: the gate fires BEFORE any state check — audited, uniform 403
         await _audit_denial(request, "session_required", principal)
         raise AppError("session_required", "interactive session required")
+    return principal
+
+
+async def require_session_only(request: Request) -> AdminPrincipal:
+    principal = await _require_interactive_session(request)
     await _header_step_up(request, principal, consume=True)
     return principal
+
+
+async def require_session_no_step_up(request: Request) -> AdminPrincipal:
+    """Interactive session, no step-up (rev 39: credential mint/reveal trust
+    the login). A bearer token — however flagged — gets the audited uniform
+    403 before any state check, so credential acquisition stays interactive
+    and the no-token-mints invariant holds."""
+    return await _require_interactive_session(request)
 
 
 async def require_sensitive(request: Request) -> AdminPrincipal:
