@@ -42,6 +42,8 @@ pub enum ItemCommand {
     ForceDrop { name: String },
     /// Snapshot metadata for one item.
     History { name: String },
+    /// Rename a live item (fields and history move with it).
+    Rename { name: String, new_name: String },
 }
 
 pub async fn run(client: &Client, cmd: ItemCommand, as_json: bool) -> Result<(), CliError> {
@@ -185,6 +187,26 @@ pub async fn run(client: &Client, cmd: ItemCommand, as_json: bool) -> Result<(),
                     .and_then(Value::as_u64)
                     .unwrap_or(0)
             );
+        }
+        ItemCommand::Rename { name, new_name } => {
+            let body = client
+                .post(
+                    // the route is require_admin: session or any admin token
+                    RouteClass::TokenPermitted,
+                    &format!("/api/admin/items/{}/rename", Client::seg(&name)),
+                    Some(serde_json::json!({ "name": new_name })),
+                    None,
+                )
+                .await?;
+            let renamed = body
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(new_name.as_str());
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&body)?);
+            } else {
+                println!("{renamed}");
+            }
         }
         ItemCommand::History { name } => {
             let body = client

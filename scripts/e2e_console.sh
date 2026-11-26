@@ -438,6 +438,114 @@ ok(RESTORE === 200, `restore undeletes the item (status ${RESTORE})`);
   ok(true, "Purge from the list removes the deleted item for good");
 }
 
+// 6c. rename from the drawer: only the name moves — the probe carries a
+// note and a field so "nothing is lost" is actually tested. Its own item.
+{
+  const REN_OLD = "zz-rename-old";
+  const REN_NEW = "zz-rename-new";
+  const csrf = await page.evaluate(async () =>
+    (await (await fetch("/api/auth/status", { credentials: "same-origin" })).json()).csrf_token);
+  await page.evaluate(async ({ item, csrf }) => {
+    await fetch("/api/admin/items", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json", "x-csrf-token": csrf },
+      body: JSON.stringify({
+        name: item,
+        notes: "rename keeps me",
+        fields: [{ name: "API_KEY", secret: true, value: "cu-test-rename" }],
+      }),
+    });
+  }, { item: REN_OLD, csrf });
+  await page.goto(`${BASE}/items`);
+  await until(() => page.evaluate(({ item }) =>
+    [...document.querySelectorAll("tr")].some((r) => r.textContent.includes(item)),
+    { item: REN_OLD }), "the rename probe row");
+  await page.evaluate(({ item }) => {
+    const row = [...document.querySelectorAll("tr")].find((r) => r.textContent.includes(item));
+    [...row.querySelectorAll("button")].find((b) => /^Open$/.test(b.textContent.trim())).click();
+  }, { item: REN_OLD });
+  await until(() => page.evaluate(() => !!document.querySelector(".drawer")), "the drawer");
+  await clickWhenReady("^Rename$", ".drawer", "the rename toggle");
+  await until(() => page.evaluate(() =>
+    [...document.querySelectorAll(".drawer input")].some(
+      (i) => i.closest("label")?.textContent.startsWith("New name"))), "the rename field");
+  await page.evaluate(({ name }) => {
+    const set = (el, v) => {
+      const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+      s.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const label = [...document.querySelectorAll(".drawer input")].find(
+      (i) => i.closest("label")?.textContent.startsWith("New name"));
+    set(label, name);
+  }, { name: REN_NEW });
+  await clickWhenReady("^Apply rename$", ".drawer", "apply the rename");
+  await until(() => page.evaluate(async ({ oldName, newName }) => {
+    const r = await fetch(`/api/admin/items/${encodeURIComponent(newName)}`, {
+      credentials: "same-origin",
+    });
+    if (r.status !== 200) return false;
+    const gone = await fetch(`/api/admin/items/${encodeURIComponent(oldName)}`, {
+      credentials: "same-origin",
+    });
+    return gone.status === 404;
+  }, { oldName: REN_OLD, newName: REN_NEW }), "the renamed item");
+  ok(true, "Rename from the drawer moves the item to its new name");
+  // the row moved with its contents: note and field survived
+  const moved = await page.evaluate(async ({ newName }) => {
+    const r = await fetch(`/api/admin/items/${encodeURIComponent(newName)}`, {
+      credentials: "same-origin",
+    });
+    const body = await r.json();
+    return { notes: body.notes, fields: body.fields.map((f) => f.name) };
+  }, { newName: REN_NEW });
+  ok(
+    moved.notes === "rename keeps me" && moved.fields.includes("API_KEY"),
+    `rename preserves notes and fields (got ${JSON.stringify(moved)})`,
+  );
+  // the list shows the new name without a manual reload
+  await until(() => page.evaluate(({ newName }) =>
+    [...document.querySelectorAll("tr")].some((r) => r.textContent.includes(newName)),
+    { newName: REN_NEW }), "the renamed row in the list");
+  ok(true, "the list reflects the new name");
+  // conflict branch: renaming onto a live name surfaces the error notice
+  await page.evaluate(async ({ newName, csrf }) => {
+    await fetch("/api/admin/items", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json", "x-csrf-token": csrf },
+      body: JSON.stringify({ name: "zz-rename-blocker", notes: "", fields: [] }),
+    });
+  }, { newName: REN_NEW, csrf });
+  await page.goto(`${BASE}/items`);
+  await until(() => page.evaluate(({ item }) =>
+    [...document.querySelectorAll("tr")].some((r) => r.textContent.includes(item)),
+    { item: REN_NEW }), "the renamed row after reload");
+  await page.evaluate(({ item }) => {
+    const row = [...document.querySelectorAll("tr")].find((r) => r.textContent.includes(item));
+    [...row.querySelectorAll("button")].find((b) => /^Open$/.test(b.textContent.trim())).click();
+  }, { item: REN_NEW });
+  await until(() => page.evaluate(() => !!document.querySelector(".drawer")), "the drawer again");
+  await clickWhenReady("^Rename$", ".drawer", "the rename toggle again");
+  await until(() => page.evaluate(() =>
+    [...document.querySelectorAll(".drawer input")].some(
+      (i) => i.closest("label")?.textContent.startsWith("New name"))), "the rename field again");
+  await page.evaluate(() => {
+    const set = (el, v) => {
+      const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+      s.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const label = [...document.querySelectorAll(".drawer input")].find(
+      (i) => i.closest("label")?.textContent.startsWith("New name"));
+    set(label, "zz-rename-blocker");
+  });
+  await clickWhenReady("^Apply rename$", ".drawer", "apply the conflicting rename");
+  await until(() => page.evaluate(() =>
+    (document.querySelector(".drawer")?.textContent || "").includes("already exists")),
+    "the conflict notice");
+  ok(true, "renaming onto a taken name shows the conflict notice");
+}
+
 // 7. key mint: a header button opens the mint drawer (the console's modal
 // idiom); session only (rev 39); full-authority model (rev 38: label only)
 await page.goto(`${BASE}/keys`);

@@ -31,6 +31,7 @@ from custos.limits import (
     check_caps,
     plan_patch_ops,
     plan_put_ops,
+    valid_item_name,
     validate_post_body,
 )
 
@@ -471,6 +472,48 @@ async def patch_item(
         else None,
     )
     return _response(item, supplied, new_notes, mask=mask)
+
+
+async def rename_item(
+    session: AsyncSession,
+    maker: async_sessionmaker[AsyncSession],
+    vault: Vault,
+    p: Principal,
+    name: str,
+    new_name: str,
+) -> dict[str, Any]:
+    """Rename a live item (§5, rev 43). Only the name changes: fields,
+    history and revision count stay with the row. The collision check covers
+    soft-deleted names too — the name stays reserved until restore or purge."""
+    if valid_item_name(new_name) is None:
+        raise AppError("invalid", "invalid item name")
+    item = await _lock_item(session, name)
+    if item is None or item.deleted_at is not None:
+        raise _not_found()
+    if new_name == name:
+        return {"name": name, "revision": item.revision}
+    clash = (
+        await session.execute(select(Item.id).where(Item.name == new_name))
+    ).first()
+    if clash is not None:
+        raise AppError(
+            "conflict",
+            "an item with that name already exists (restore or purge it first)",
+        )
+    pre_revision = item.revision
+    item.name = new_name
+    item.revision += 1
+    try:
+        await session.flush()
+    except IntegrityError:
+        # a concurrent create/rename claimed new_name after the check above
+        raise AppError(
+            "conflict",
+            "an item with that name already exists (restore or purge it first)",
+        ) from None
+    await _audit_write(session, p, "rename", item, pre_revision, [],
+                       extra_detail={"from": name})
+    return {"name": new_name, "revision": item.revision}
 
 
 async def soft_delete(

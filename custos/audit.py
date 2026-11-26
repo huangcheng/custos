@@ -23,7 +23,7 @@ from custos.db.models import AuditRow, AuthEvent
 ACTION_ENUM: frozenset[str] = frozenset(
     {
         "list", "search", "get", "env", "create", "put", "patch", "delete", "restore",
-        "purge", "force_drop", "history", "reveal", "device.login", "key.mint",
+        "purge", "force_drop", "rename", "history", "reveal", "device.login", "key.mint",
         "key.revoke", "key.list", "key.reveal", "token.mint", "token.revoke",
         "token.list", "token.reveal",
         "operator.login", "operator.logout", "operator.step_up",
@@ -47,6 +47,7 @@ AUTH_EVENT_KINDS: frozenset[str] = frozenset(
 DETAIL_KEYS: frozenset[str] = frozenset(
     {
         "pre_revision", "revision", "evicted", "evicted_ids", "dropped_unreadable",
+        "from",
         "codes_consumed", "count", "remaining", "skipped", "key_id", "break_glass",
         "allow_sensitive", "allow_hazardous", "ip", "stage", "reason", "created", "pruned",
         "tokens_revoked", "sessions_invalidated",

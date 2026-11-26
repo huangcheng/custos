@@ -185,6 +185,10 @@ export function Items({ onSignOut }: { onSignOut: () => void }) {
           key={open}
           existing={open}
           onClose={() => setOpen(null)}
+          onRenamed={(name) => {
+            setOpen(name);
+            void load(null);
+          }}
           onSaved={() => {
             setOpen(null);
             void load(null);
@@ -199,10 +203,12 @@ function ItemDrawer({
   existing,
   onClose,
   onSaved,
+  onRenamed,
 }: {
   existing: string | null;
   onClose: () => void;
   onSaved: () => void;
+  onRenamed?: (name: string) => void;
 }) {
   const [item, setItem] = useState<Item | null>(null);
   const [form, setForm] = useState<ItemForm>(emptyForm());
@@ -211,6 +217,8 @@ function ItemDrawer({
   // cannot fire overlapping requests (and give the button a busy state)
   const [revealing, setRevealing] = useState(false);
   const [revealError, setRevealError] = useState("");
+  const [renaming, setRenaming] = useState(false);
+  const [renameTo, setRenameTo] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [stepUpFor, setStepUpFor] = useState<null | ((token: string) => Promise<void>)>(null);
@@ -388,6 +396,29 @@ function ItemDrawer({
     }
   };
 
+  const rename = async () => {
+    if (!existing) return;
+    const target = renameTo.trim();
+    if (!target) {
+      setError("enter the new name");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const data = await api<{ name: string }>(
+        "POST", `/api/admin/items/${encodeURIComponent(existing)}/rename`,
+        { name: target },
+      );
+      setRenaming(false);
+      onRenamed?.(data.name);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "rename failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const restore = () => {
     if (!existing) return;
     setStepUpFor(() => async (token: string) => {
@@ -408,6 +439,23 @@ function ItemDrawer({
         {error ? <Notice kind="error">{error}</Notice> : null}
         {revealError ? <Notice kind="error">{revealError}</Notice> : null}
         {item?.deleted ? <Notice kind="warn">This item is soft-deleted.</Notice> : null}
+        {renaming ? (
+          <div className="row">
+            <TextField
+              label="New name"
+              value={renameTo}
+              onChange={setRenameTo}
+              hint="lowercase, digits, dot, dash, underscore — unsaved edits below are discarded"
+            />
+            <Button
+              label="Apply rename"
+              variant="primary"
+              onClick={() => void rename()}
+              disabled={busy}
+            />
+            <Button label="Cancel" variant="ghost" onClick={() => setRenaming(false)} />
+          </div>
+        ) : null}
         {!existing ? (
           <TextField
             label="Name"
@@ -488,6 +536,17 @@ function ItemDrawer({
           </div>
         </fieldset>
         <div className="row">
+          {item && !item.deleted && existing ? (
+            <Button
+              label="Rename"
+              variant="ghost"
+              onClick={() => {
+                setRenaming(true);
+                setRenameTo(existing);
+              }}
+              disabled={busy}
+            />
+          ) : null}
           <Button
             label="Save"
             variant="primary"

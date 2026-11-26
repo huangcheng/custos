@@ -29,7 +29,14 @@ from custos.admin.items import (
     reveal,
 )
 from custos.errors import AppError
-from custos.items import create_item, force_drop, patch_item, put_item, soft_delete
+from custos.items import (
+    create_item,
+    force_drop,
+    patch_item,
+    put_item,
+    rename_item,
+    soft_delete,
+)
 from custos.routes_agent import _etag, _json_body, _page_limit, list_via_engine
 
 router = APIRouter(prefix="/api/admin")
@@ -223,6 +230,26 @@ async def patch_one(
     result = await _write_with_downgrade_gate(
         request, p, name, body, request.headers.get("if-match"), "patch"
     )
+    _etag(response, result["revision"])
+    return result
+
+
+@router.post("/items/{name}/rename")
+async def rename_one(
+    name: str, request: Request, response: Response,
+    p: AdminPrincipal = Depends(require_admin),
+) -> dict[str, Any]:
+    """Rename a live item (rev 43). Body `{"name": "<new name>"}`."""
+    body = await _json_body(request)
+    new_name = body.get("name")
+    if not isinstance(new_name, str):
+        raise AppError("invalid", "name must be a string")
+    async with request.app.state.session_maker() as session:
+        result = await rename_item(
+            session, request.app.state.session_maker,
+            request.app.state.vault, p, name, new_name,
+        )
+        await session.commit()
     _etag(response, result["revision"])
     return result
 

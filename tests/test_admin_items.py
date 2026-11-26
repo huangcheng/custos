@@ -202,3 +202,48 @@ async def test_hazardous_gate_fires_before_materialisation(admin_stack) -> None:
             await s.commit()
         r = await client.get("/api/admin/items/hazbad/env?allow_hazardous=1")
         assert r.status_code == 401 and r.json()["code"] == "step_up_required"
+
+
+async def test_rename_item(admin_stack) -> None:
+    """rev 43: rename keeps the row (fields, history, revision) — only the
+    name moves; collisions and deleted targets are refused."""
+    async with admin_stack() as (client, maker, h):
+        csrf = await h["login"](client)
+        hdr = {"x-csrf-token": csrf}
+        assert (await client.post("/api/admin/items", headers=hdr,
+                                 json=body("old-name"))).status_code == 201
+        r = await client.post("/api/admin/items/old-name/rename", headers=hdr,
+                              json={"name": "new-name"})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "new-name"
+        assert (await client.get("/api/admin/items/old-name", headers=hdr)).status_code == 404
+        moved = await client.get("/api/admin/items/new-name", headers=hdr)
+        assert moved.status_code == 200
+        assert moved.json()["deleted"] is False
+        # collision with a live name → 409
+        assert (await client.post("/api/admin/items", headers=hdr,
+                                 json=body("other-name"))).status_code == 201
+        r = await client.post("/api/admin/items/new-name/rename", headers=hdr,
+                              json={"name": "other-name"})
+        assert r.status_code == 409 and r.json()["code"] == "conflict"
+        # a soft-deleted target name stays reserved → 409
+        assert (await client.delete("/api/admin/items/other-name",
+                                   headers=hdr)).status_code == 204
+        r = await client.post("/api/admin/items/new-name/rename", headers=hdr,
+                              json={"name": "other-name"})
+        assert r.status_code == 409
+        # invalid grammar → 422
+        r = await client.post("/api/admin/items/new-name/rename", headers=hdr,
+                              json={"name": "NOT VALID"})
+        assert r.status_code == 422 and r.json()["code"] == "invalid"
+        # the move is audited with the previous name
+        from sqlalchemy import select as _select
+
+        from custos.db.models import AuditRow
+
+        async with maker() as s:
+            row = (await s.execute(
+                _select(AuditRow).where(AuditRow.action == "rename")
+            )).scalars().first()
+            assert row is not None and row.item_name == "new-name"
+            assert row.detail.get("from") == "old-name"
