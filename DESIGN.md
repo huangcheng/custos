@@ -1,55 +1,61 @@
 # Custos console — visual system
 
-The subject is a **credential vault**: a single operator's ledger of sealed
-values. The interface is a reading surface, not a dashboard of decoration.
-Direction: **ledger and seal** — cool paper, hairline rules, one verdigris
-accent, type that does the work.
+Custos shares the sibling projects' visual language (Portunus `DESIGN.md`,
+Janus): **deep-ink structural frame, cool-gray workspace, near-white
+surfaces, one chartreuse accent, Geist type**. The palette is family
+property, not a local choice — do not retheme it.
 
 ## Tokens
 
 | Token | Value | Use |
 |---|---|---|
-| `--ink` | `#14181d` | sidebar frame |
-| `--ink-raised` | `#1c222a` | active nav row |
-| `--ink-accent` | `#4fa192` | 2px active-nav bar on ink |
-| `--workspace` | `#f2f4f5` | page background |
-| `--surface` | `#ffffff` | cards |
-| `--surface-sunk` | `#f7f9fa` | table head, row hover |
-| `--line` / `--line-soft` | `#dde2e6` / `#ebeff2` | card border / row rule |
-| `--text` / `--text-dim` | `#171d22` / `#5c6871` | body / secondary |
-| `--accent` / `--accent-strong` / `--accent-soft` | `#1f6f63` / `#185a50` / `#e6f0ee` | primary action, focus of attention |
+| `--ink` | `#10151a` | sidebar frame, drawer identity |
+| `--ink-raised` | `#171e25` | active nav row |
+| `--workspace` | `#eef1f3` | page background |
+| `--surface` | `#fbfcfc` | cards |
+| `--surface-sunk` | `#f7f9fa` | table head |
+| `--line` / `--line-soft` | `#d7dde1` / `#eceff1` | card border / row rule |
+| `--text` / `--text-dim` | `#131a20` / `#5b6a75` | body / secondary |
+| `--accent` | `#c8f751` chartreuse | primary action, current nav, focus of attention |
+| `--accent-soft` | `#f2fcd9` | accent pill / success notice fill |
 | `--danger` | `#b3261e` | destructive only |
 
-Contrast: every text pair clears WCAG AA (body 17:1, secondary 5.2–5.7:1,
-white on accent 5.98:1). Accent is used for exactly three things: the primary
-button, the active-nav bar, and the success notice. Nothing else.
+WCAG AA on every text pair. The accent is for primary actions and the
+current page — never decoration.
 
 ## Type
 
-One family (Geist), one mono (Geist Mono) for identifiers and codes.
-Scale, fixed pixels — no `vw`, no half-pixels: **28 / 14 / 13 / 12**.
-Headings use `text-wrap: balance`; prose caps at 78ch with
-`text-wrap: pretty`. Table headers are sentence case at 13px — all-caps
-micro-labels are a generated-default tell, not a choice.
+Geist Variable for interface, Geist Mono Variable for ids, counts and
+micro-labels. Page titles fluid `clamp(30px, 3vw, 42px)`; body 14;
+supporting 13/12; **table headers are mono 10px uppercase with 0.08em
+tracking** (sibling convention). Tabular numerals for counts; identifiers
+truncate with `title`.
+
+## Controls (ported from the siblings)
+
+- Buttons **42px** tall, 0 17px padding, radius 10, weight 600, 13px,
+  inline-flex with 8px gap.
+- Primary carries an inset bottom hairline and a soft accent glow; hover
+  lifts 1px and deepens the glow; **press scales to 0.98**; disabled 0.45.
+- Ghost is 36px / 12.5px with no border; destructive is an outline that
+  tints on hover.
+- Inputs 44px, radius 10, focus ring is a 3px halo (no outline jump).
+- Transitions 160–180ms on the standard ease; honours reduced motion.
 
 ## Layout
 
-- The work surface fills the window (operator directive, 2026-11-26). No
-  max-width on `.workspace`; prose keeps its own measure.
-- Grid tracks are `minmax(0, 1fr)` so a wide table scrolls **inside** its
-  card instead of widening the page.
-- One elevated surface per page: the data table. Everything else is a
-  hairline on white.
-- Rhythm is 4-based: 8 / 12 / 16 / 24 / 32. Controls share one height (36px min-height, 37px rendered with borders).
-- Wide content scrolls in its container; the page never scrolls sideways.
+- Work surface fills the window (operator directive); prose keeps 78ch.
+- Grid tracks are `minmax(0, 1fr)`; wide tables scroll **inside** the card.
+- Cards radius 18, hairline border, one soft shadow.
+- Table rhythm 12/16 head, 15/16 rows, accent-tinted hover on pointer
+  devices only.
+- 4-based spacing (8/12/16/24/32).
 
 ## Rules
 
-1. Don't decorate. A border, rule or divider must encode structure.
-2. One accent, three uses. If a fourth appears, something is wrong.
-3. Numbers are tabular; identifiers are mono; prose is sans.
-4. Empty states invite the next action and say what it does.
-5. Destructive actions are confirmed; the confirmation names the object.
-6. Motion only answers an action (open, confirm, reveal) and honours
-   `prefers-reduced-motion`.
-7. Verify by measurement — computed styles and DOM geometry — not by eye.
+1. Palette is family property; polish layout and controls, don't retheme.
+2. The accent marks action and location. Nothing else.
+3. Numbers tabular, identifiers mono, prose sans.
+4. Destructive actions confirm, and the confirmation names the object.
+5. Motion answers an action only.
+6. Verify by measurement — computed styles and geometry — not by eye.

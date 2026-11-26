@@ -671,9 +671,9 @@ ok(
 );
 // step 11 overwrites this unconfirmed enrolment with its own /totp/setup
 
-// 10c. design invariants (DESIGN.md), checked on every table page: one
-// accent derived from the token, no acid-green anywhere, one control height,
-// exactly the table card elevated, sentence-case 13px headers.
+// 10c. design invariants (DESIGN.md, sibling parity): the accent comes from
+// the token and marks the primary action + current nav; controls are the
+// sibling 42px; headers are mono 10px uppercase micro-labels.
 const designProbe = () => page.evaluate(() => {
   const cs = (el) => getComputedStyle(el);
   const probe = document.createElement("div");
@@ -682,52 +682,67 @@ const designProbe = () => page.evaluate(() => {
   document.body.appendChild(probe);
   const accent = cs(probe).backgroundColor;
   probe.remove();
-  const acid = "rgb(200, 247, 81)";
-  const limeTint = "rgb(242, 252, 217)";
-  const limes = [];
-  for (const el of document.querySelectorAll("body *")) {
-    const st = cs(el);
-    for (const prop of ["backgroundColor", "color", "borderTopColor", "borderBottomColor"]) {
-      if (st[prop] === acid || st[prop] === limeTint) limes.push(`${el.tagName}.${prop}`);
-    }
-  }
-  const ths = [...document.querySelectorAll("table th")];
-  const caps = ths
-    .map((t) => t.textContent.trim())
-    .filter((t) => /[A-Z]{3,}/.test(t) && t === t.toUpperCase());
-  const heights = [...new Set([...document.querySelectorAll("button")]
-    .map((b) => b.getBoundingClientRect().height))];
-  const elevated = [...document.querySelectorAll(".card")]
-    .filter((c) => cs(c).boxShadow !== "none");
   const primary = document.querySelector("button.primary");
+  const nav = document.querySelector('.nav a[aria-current="page"]');
+  const th = document.querySelector("table th");
+  const thStyle = th ? cs(th) : null;
+  // every non-ghost control carries the sibling 42px height
+  const controlHeights = [...document.querySelectorAll("button")]
+    .filter((b) => !b.classList.contains("ghost"))
+    .map((b) => Math.round(b.getBoundingClientRect().height));
+  const cardRadii = [...document.querySelectorAll(".card")]
+    .map((c) => cs(c).borderRadius);
+  // visible text inputs only (checkbox/radio keep native sizing)
+  const textInput = [...document.querySelectorAll("input, select, textarea")]
+    .find((el) => {
+      if (el.type === "checkbox" || el.type === "radio") return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    });
   return {
     accent,
-    primary: primary ? cs(primary).backgroundColor : null,
-    limes,
-    caps,
-    heights,
-    elevated: elevated.length,
-    tableElevated: elevated.length === 1 && !!elevated[0].querySelector(":scope > table"),
-    thSize: ths.length ? cs(ths[0]).fontSize : null,
+    primaryBg: primary ? cs(primary).backgroundColor : null,
+    controlHeights,
+    navBg: nav ? cs(nav).backgroundColor : null,
+    thFamily: thStyle ? thStyle.fontFamily : null,
+    thSize: thStyle ? thStyle.fontSize : null,
+    thTransform: thStyle ? thStyle.textTransform : null,
+    thTracking: thStyle ? thStyle.letterSpacing : null,
+    cardRadii,
+    inputHeight: textInput ? Math.round(textInput.getBoundingClientRect().height) : null,
   };
 });
 for (const route of ["/items", "/audit"]) {
   await page.goto(`${BASE}${route}`);
   await until(() => page.evaluate(() => !!document.querySelector("table th")), `the ${route} table`);
   const d = await designProbe();
-  ok(!d.primary || d.primary === d.accent, `${route}: the primary action uses the accent token`);
-  ok(d.limes.length === 0, `${route}: no acid-green anywhere (${d.limes.slice(0, 3).join(",")})`);
+  // the family palette itself, not just the relationships between elements
   ok(
-    d.heights.every((h) => h >= 36 && h <= 38),
-    `${route}: one control height ~36px (got ${JSON.stringify(d.heights)})`,
+    d.accent === "rgb(200, 247, 81)",
+    `${route}: --accent is the family chartreuse (got ${d.accent})`,
   );
   ok(
-    d.elevated === 1 && d.tableElevated,
-    `${route}: only the table card is elevated (elevated=${d.elevated}, table=${d.tableElevated})`,
+    d.primaryBg === d.accent,
+    `${route}: the primary action uses the accent token (${d.primaryBg} vs ${d.accent})`,
   );
   ok(
-    d.thSize === "13px" && d.caps.length === 0,
-    `${route}: sentence-case 13px headers (all-caps: ${JSON.stringify(d.caps.slice(0, 3))})`,
+    d.controlHeights.length > 0 && d.controlHeights.every((h) => h === 42),
+    `${route}: non-ghost controls are 42px (got ${JSON.stringify(d.controlHeights)})`,
+  );
+  ok(d.navBg === d.accent, `${route}: the current nav item carries the accent (${d.navBg})`);
+  ok(
+    /Geist Mono/i.test(d.thFamily || "") && d.thSize === "10px"
+      && d.thTransform === "uppercase"
+      && Math.abs(parseFloat(d.thTracking) - 0.8) < 0.01,
+    `${route}: headers are Geist Mono 10px uppercase (${d.thFamily} ${d.thSize} ${d.thTransform} ${d.thTracking})`,
+  );
+  ok(
+    d.cardRadii.length > 0 && d.cardRadii.every((r) => r === "18px"),
+    `${route}: cards use the sibling 18px radius (got ${JSON.stringify(d.cardRadii)})`,
+  );
+  ok(
+    route !== "/audit" || d.inputHeight === 44,
+    `${route}: visible inputs are the sibling 44px (got ${d.inputHeight})`,
   );
 }
 

@@ -49,7 +49,7 @@ export function OneTimePanel({
   return (
     <div
       className="card stack"
-      style={{ borderColor: "var(--accent)", marginBottom: 18 }}
+      style={{ marginBottom: 18 }}
       data-testid="one-time-panel"
     >
       <Notice kind="warn">
