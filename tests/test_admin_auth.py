@@ -129,30 +129,43 @@ async def test_session_only_matrix_precedes_state(admin_stack) -> None:
 
 
 async def test_sensitive_gate(admin_stack) -> None:
+    """rev 41: secret reads need a session or an allow_sensitive token — no
+    step-up. A plain token is refused outright (no header can rescue it)."""
     async with admin_stack() as (client, maker, h):
-        csrf = await h["login"](client)
-        # session without header → 401 step_up_required
+        await h["login"](client)
+        # session without any step-up header → passes
         req = _fake_request(h["app"])
         req.cookies = {"custos_session": client.cookies["custos_session"]}
-        with pytest.raises(AppError) as exc:
-            await require_sensitive(req)
-        assert exc.value.code == "step_up_required"
-        # plain token → 401 step_up_required
+        p = await require_sensitive(req)
+        assert p.actor_kind == "operator_session"
+        # plain token → 403 forbidden (not a step-up prompt)
         plain = await h["mint_co"]()
         with pytest.raises(AppError) as exc:
             await require_sensitive(_fake_request(h["app"], bearer(plain)))
-        assert exc.value.code == "step_up_required"
+        assert exc.value.code == "forbidden"
         # allow_sensitive token → passes, marks request.state
         sens = await h["mint_co"](allow_sensitive=True)
         req = _fake_request(h["app"], bearer(sens))
         p = await require_sensitive(req)
         assert p.actor_kind == "operator_token"
         assert req.state.allow_sensitive is True
-        # session WITH a real step-up → passes
+
+
+async def test_sensitive_mutation_gate_keeps_step_up(admin_stack) -> None:
+    """restore and friends keep the pre-rev-41 behaviour."""
+    from custos.admin.auth import require_sensitive_step_up
+
+    async with admin_stack() as (client, maker, h):
+        csrf = await h["login"](client)
+        req = _fake_request(h["app"])
+        req.cookies = {"custos_session": client.cookies["custos_session"]}
+        with pytest.raises(AppError) as exc:
+            await require_sensitive_step_up(req)
+        assert exc.value.code == "step_up_required"
         token = await h["step_up"](client, csrf)
         req = _fake_request(h["app"], {"x-step-up-token": token})
         req.cookies = {"custos_session": client.cookies["custos_session"]}
-        p = await require_sensitive(req)
+        p = await require_sensitive_step_up(req)
         assert p.actor_kind == "operator_session"
 
 

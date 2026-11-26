@@ -12,6 +12,7 @@ import {
 } from "../keys";
 import { decodeCreateOptions, encodeAttestation, type PublicKeyCredentialCreationOptionsJSON } from "../webauthn";
 import { truncate } from "../plain";
+import { QrCode } from "../components/QrCode";
 import type {
   AuthStatus,
   MintedToken,
@@ -93,6 +94,7 @@ function Account({
   const [pkLabel, setPkLabel] = useState("");
   const [pending, setPending] = useState<null | ((token: string) => Promise<void>)>(null);
   const [totpSecret, setTotpSecret] = useState("");
+  const [totpUri, setTotpUri] = useState("");
   const [totpCode, setTotpCode] = useState("");
 
   // GET /api/auth/passkeys is step-up gated, so listing is an explicit action
@@ -200,7 +202,8 @@ function Account({
                   about: "Custos TOTP",
                 });
                 setTotpSecret(started.secret);
-                setMessage("Add this secret to your authenticator, then confirm below.");
+                setTotpUri(started.provisioning_uri);
+                setMessage("Scan the QR with your authenticator, then confirm below.");
               })
             }
           />
@@ -226,8 +229,12 @@ function Account({
         </div>
         {totpSecret ? (
           <div className="card stack">
-            <p className="mono" style={{ margin: 0 }}>
-              secret: {totpSecret}
+            {totpUri ? <QrCode value={totpUri} /> : null}
+            <p className="muted" style={{ margin: 0 }}>
+              Can&apos;t scan? Enter this key manually:
+            </p>
+            <p className="mono" style={{ margin: 0, wordBreak: "break-all" }}>
+              {totpSecret}
             </p>
             <TextField
               label="First code from your authenticator"
@@ -255,6 +262,7 @@ function Account({
                       about: "TOTP enable",
                     });
                     setTotpSecret("");
+                  setTotpUri("");
                     setTotpCode("");
                     setMessage("TOTP enabled.");
                     onStatusChanged();

@@ -10,7 +10,14 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from custos.admin.auth import AdminPrincipal, require_admin, require_sensitive, require_session_only
+from custos.admin.auth import (
+    AdminPrincipal,
+    require_admin,
+    require_sensitive,
+    require_sensitive_step_up,
+    require_session_only,
+    require_step_up_for,
+)
 from custos.admin.items import (
     _sensitive_detail,
     admin_env,
@@ -74,6 +81,13 @@ async def get_env(
     allow_hazardous: str | None = None,
     p: AdminPrincipal = Depends(require_sensitive),
 ) -> Response:
+    # rev 41 dropped the prompt for the plain read only. Emitting the hazardous
+    # deny-set (PATH, LD_*, …) is an override, not a read: an allow_sensitive
+    # token passes, an operator session must present a step-up. (Plain tokens
+    # never reach here — require_sensitive already refused them with 403.)
+    # Decide from the principal, not the audit marker on request.state.
+    if allow_hazardous == "1" and not p.allow_sensitive:
+        await require_step_up_for(request, p)
     async with request.app.state.session_maker() as session:
         output = await admin_env(
             session, request.app.state.session_maker, request.app.state.vault, p, name,
@@ -228,7 +242,7 @@ async def delete_one(
 @router.post("/items/{name}/restore")
 async def restore_one(
     name: str, request: Request, response: Response,
-    p: AdminPrincipal = Depends(require_sensitive),
+    p: AdminPrincipal = Depends(require_sensitive_step_up),
 ) -> dict[str, Any]:
     async with request.app.state.session_maker() as session:
         result = await restore(

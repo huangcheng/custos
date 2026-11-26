@@ -3,7 +3,7 @@
 #
 # Brings up the same throwaway stack as e2e.sh, then drives the BUILT console
 # through a real browser: static contract, login, CSRF recovery after a reload,
-# masked listing and drawer, step-up gated reveal, If-Match conflict and
+# masked listing and drawer, session-only reveal (rev 41), If-Match conflict and
 # delete/restore, key mint (token shown once, and it must authenticate), the
 # key.mint audit row, and the device hand-off fragment.
 #
@@ -196,6 +196,25 @@ const clickWhenReady = (reSource, scopeSel, label) => until(() => page.evaluate(
     if (b && !b.disabled) { b.click(); return true; }
     return false;
   }, { reSource, scopeSel }), label);
+const fillStepUp = (password, factor) => page.evaluate(({ password, factor }) => {
+  const set = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, "value").set;
+    setter.call(el, v);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const form = document.querySelector(".scrim form");
+  if (!form) throw new Error("step-up prompt not open");
+  const inputs = [...form.querySelectorAll("input")];
+  const passwordInput = inputs.find((i) => i.type === "password");
+  if (!passwordInput) throw new Error("step-up password field missing");
+  set(passwordInput, password);
+  if (factor != null) {
+    const otp = inputs.find((i) => i.getAttribute("autocomplete") === "one-time-code");
+    if (!otp) throw new Error("step-up factor field missing");
+    set(otp, factor);
+  }
+}, { password, factor });
 
 // NOTE: page.evaluate callbacks are serialized into the page, so they cannot
 // close over anything here. Each callback that types defines its own setter.
@@ -271,7 +290,7 @@ await until(
 );
 ok(!(await leaked(SECRET_VALUE)), "secret value absent from the list DOM (text, inputs, attributes)");
 
-// 4. opening the drawer still masks, and reveal is step-up gated
+// 4. opening the drawer still masks; reveal needs only the session (rev 41)
 await page.evaluate(({ item }) => {
   const row = [...document.querySelectorAll("tr")].find((r) => r.textContent.includes(item));
   if (!row) throw new Error("item row not found");
@@ -304,34 +323,29 @@ await until(
     }),
   "the drawer Reveal button",
 );
-await until(() => page.evaluate(() => !!document.querySelector(".scrim form")), "the step-up prompt");
-ok(
-  await page.evaluate(() => document.body.textContent.includes("Confirm password")),
-  "reveal demands a step-up",
-);
-
-// 5. pass the step-up: the value appears only now
-await page.evaluate(async ({ pw }) => {
-  const set = (el, v) => {
-    const setter = Object.getOwnPropertyDescriptor(
-      window.HTMLInputElement.prototype, "value").set;
-    setter.call(el, v);
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-  };
-  const prompt = document.querySelector(".scrim form");
-  set(prompt.querySelector('input[type="password"]'), pw);
-  await new Promise((r) => setTimeout(r, 50));
-  [...prompt.querySelectorAll("button")].find((b) => /Continue/i.test(b.textContent)).click();
-}, { pw: PW });
+// rev 41: revealing a stored secret needs only the session. Wait for the
+// value FIRST, then assert no prompt: checking before the async render would
+// pass vacuously if a step-up regression returned.
 await until(
   () =>
     page.evaluate(({ secret }) => {
-      const drawer = document.querySelector(".drawer");
-      return !!drawer && drawer.textContent.includes(secret);
+      const el = document.querySelector('[data-testid="revealed-TOKEN"]');
+      return !!el && el.textContent.trim() === secret;
     }, { secret: SECRET_VALUE }),
-  "the revealed value",
+  "the revealed value in the field's revealed cell",
 );
-ok(true, "revealed value appears after the step-up");
+ok(
+  await page.evaluate(() => {
+    const reveal = [...document.querySelectorAll(".drawer button")]
+      .find((b) => /Reveal/i.test(b.textContent));
+    return !!reveal && !reveal.disabled;
+  }),
+  "the Reveal button leaves its busy state after the session-only reveal",
+);
+ok(
+  await page.evaluate(() => !document.querySelector(".scrim form")),
+  "item reveal opens no password prompt (rev 41)",
+);
 
 // 6. drop and restore the item
 await page.evaluate(() => {
@@ -425,7 +439,7 @@ const MATCH = await page.evaluate(async ({ item, value }) => {
 ok(MATCH.ok, `If-Match rejects a stale revision (${MATCH.why})`);
 
 // 7. key mint: a header button opens the mint drawer (the console's modal
-// idiom); step-up gated; full-authority model (rev 38: label only)
+// idiom); session only (rev 39); full-authority model (rev 38: label only)
 await page.goto(`${BASE}/keys`);
 await until(
   () => page.evaluate(() => document.body.textContent.includes("Mint key")),
@@ -633,6 +647,32 @@ ok(
   "API still reachable after SPA navigation",
 );
 
+// 10b. TOTP enrolment shows a scannable QR, not just a bare secret
+await page.goto(`${BASE}/settings`);
+await until(() => page.evaluate(() =>
+  [...document.querySelectorAll("button")].some((b) => /Enable TOTP/i.test(b.textContent))),
+  "the account settings");
+await clickWhenReady("Enable TOTP", null, "start TOTP enrolment");
+await until(() => page.evaluate(() => !!document.querySelector(".scrim form")), "enrolment step-up");
+await fillStepUp(PW, null);
+await clickWhenReady("^Continue$", ".scrim form", "enrolment step-up continue");
+await until(() => page.evaluate(() => !!document.querySelector('[data-testid="totp-qr"]')),
+  "the enrolment QR");
+ok(
+  await page.evaluate(() => {
+    const svg = document.querySelector('[data-testid="totp-qr"]');
+    if (!svg) return false;
+    const span = Number((svg.getAttribute("viewBox") || "").split(" ")[2] || 0);
+    const cells = (svg.querySelector("path")?.getAttribute("d") || "").split("M").length - 1;
+    // a real QR for an otpauth URI: >=25 modules + quiet zone, many dark cells
+    return span >= 33 && cells > 200;
+  }),
+  "the enrolment QR is a real matrix (modules + quiet zone), not a placeholder",
+);
+// step 11 overwrites this unconfirmed enrolment with its own /totp/setup,
+// so there is no pending state to discard here
+await page.goto(`${BASE}/items`);
+
 // 11. TOTP two-step sign-in (rev 37 login UX): enable TOTP through the real
 // API, log out, and prove the credentials→code advance is client-side (no
 // password-only POST burning a 401/lockout row), the recovery fallback lives
@@ -722,23 +762,6 @@ const fillLogin = (pairs) => page.evaluate(({ pairs }) => {
     set(el, value);
   }
 }, { pairs });
-const fillStepUp = (password, factor) => page.evaluate(({ password, factor }) => {
-  const set = (el, v) => {
-    const setter = Object.getOwnPropertyDescriptor(
-      window.HTMLInputElement.prototype, "value").set;
-    setter.call(el, v);
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-  };
-  const form = document.querySelector(".scrim form");
-  if (!form) throw new Error("step-up prompt not open");
-  const inputs = [...form.querySelectorAll("input")];
-  set(inputs.find((i) => i.type === "password"), password);
-  if (factor != null) {
-    const otp = inputs.find((i) => i.getAttribute("autocomplete") === "one-time-code");
-    if (!otp) throw new Error("step-up factor field missing");
-    set(otp, factor);
-  }
-}, { password, factor });
 const logout = async () => {
   const csrf = await csrfNow();
   const r = await post("/api/auth/logout", {}, { "x-csrf-token": csrf });

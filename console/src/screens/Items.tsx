@@ -66,7 +66,7 @@ export function Items({ onSignOut }: { onSignOut: () => void }) {
     <>
       <h1 className="page-title">Items</h1>
       <p className="page-sub">
-        Named credentials. Secret fields stay masked until a step-up reveal.
+        Named credentials. Secret fields stay masked until you reveal them.
       </p>
       {error ? <Notice kind="error">{error}</Notice> : null}
       <div className="row" style={{ margin: "16px 0" }}>
@@ -160,6 +160,10 @@ function ItemDrawer({
   const [item, setItem] = useState<Item | null>(null);
   const [form, setForm] = useState<ItemForm>(emptyForm());
   const [revealed, setRevealed] = useState<Record<string, string>>({});
+  // a reveal is an audited sensitive read: serialise it so a double-click
+  // cannot fire overlapping requests (and give the button a busy state)
+  const [revealing, setRevealing] = useState(false);
+  const [revealError, setRevealError] = useState("");
   const [history, setHistory] = useState<HistoryRow[] | null>(null);
   const [historyCursor, setHistoryCursor] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<{ name: string; value: string } | null>(null);
@@ -245,18 +249,46 @@ function ItemDrawer({
     }
   };
 
+  // rev 41: revealing a stored secret needs only the session — no password.
+  // One guarded wrapper for both reveal kinds: serialised (each call is an
+  // audited read), and a failure never leaves stale plaintext on screen.
+  const guardedReveal = async (run: () => Promise<void>, onFail: () => void) => {
+    if (!existing || revealing) return;
+    setRevealing(true);
+    setRevealError("");
+    try {
+      await run();
+    } catch (err) {
+      onFail();
+      // a reveal failure must not wipe an unrelated save/history error
+      setRevealError(err instanceof Error ? err.message : "reveal failed");
+    } finally {
+      setRevealing(false);
+    }
+  };
+
   const reveal = (name: string) => {
-    if (!existing) return;
-    setStepUpFor(() => async (token: string) => {
-      const data = await api<Item>(
-        "GET",
-        `/api/admin/items/${encodeURIComponent(existing)}/reveal`,
-        undefined,
-        { stepUpToken: token },
-      );
-      const found = data.fields.find((f) => f.name === name);
-      setRevealed((prev) => ({ ...prev, [name]: found?.value ?? "" }));
-    });
+    const target = existing;
+    if (!target) return;
+    return guardedReveal(
+      async () => {
+        const data = await api<Item>(
+          "GET",
+          `/api/admin/items/${encodeURIComponent(target)}/reveal`,
+        );
+        const found = data.fields.find((f) => f.name === name);
+        // an unsaved field is not on the server: say so instead of showing
+        // a blank "revealed" value
+        if (!found) throw new Error(`field ${name} is not saved yet`);
+        setRevealed((prev) => ({ ...prev, [name]: found.value ?? "" }));
+      },
+      () =>
+        setRevealed((prev) => {
+          const next = { ...prev };
+          delete next[name];
+          return next;
+        }),
+    );
   };
 
   const loadHistory = async (next?: string | null) => {
@@ -276,16 +308,18 @@ function ItemDrawer({
   };
 
   const revealSnapshot = (id: string) => {
-    if (!existing) return;
-    setStepUpFor(() => async (token: string) => {
-      const data = await api<HistorySnapshot>(
-        "GET",
-        `/api/admin/items/${encodeURIComponent(existing)}/history/${id}/reveal`,
-        undefined,
-        { stepUpToken: token },
-      );
-      setSnapshot({ name: data.name, value: data.value });
-    });
+    const target = existing;
+    if (!target) return;
+    return guardedReveal(
+      async () => {
+        const data = await api<HistorySnapshot>(
+          "GET",
+          `/api/admin/items/${encodeURIComponent(target)}/history/${id}/reveal`,
+        );
+        setSnapshot({ name: data.name, value: data.value });
+      },
+      () => setSnapshot(null),
+    );
   };
 
   const remove = async (purge: boolean) => {
@@ -324,6 +358,7 @@ function ItemDrawer({
     >
       <div className="stack">
         {error ? <Notice kind="error">{error}</Notice> : null}
+        {revealError ? <Notice kind="error">{revealError}</Notice> : null}
         {item?.deleted ? <Notice kind="warn">This item is soft-deleted.</Notice> : null}
         {!existing ? (
           <TextField
@@ -374,8 +409,8 @@ function ItemDrawer({
                   <Button
                     label="Reveal"
                     variant="ghost"
-                    onClick={() => reveal(field.name)}
-                    disabled={!existing}
+                    onClick={() => void reveal(field.name)}
+                    disabled={revealing || !existing}
                   />
                   {revealed[field.name] !== undefined ? (
                     <span className="mono" data-testid={`revealed-${field.name}`}>
@@ -445,6 +480,7 @@ function ItemDrawer({
                       label="Reveal"
                       variant="ghost"
                       onClick={() => void revealSnapshot(row.id)}
+                      disabled={revealing}
                     />
                   </li>
                 ))}

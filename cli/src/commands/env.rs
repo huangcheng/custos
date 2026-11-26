@@ -1,7 +1,8 @@
 //! `custos env` — print an item as shell exports (§9).
 //!
-//! The admin env endpoint is `require_sensitive`: it consumes a step-up on
-//! EVERY call, so the CLI always asks for one.
+//! The plain admin env read needs only the session (rev 41). Only the
+//! `--allow-hazardous-names` override still consumes a step-up, so the CLI
+//! prompts for that flag alone — a plain `custos env` stays scriptable.
 //!
 //! The server owns the escaping and the hazard rules and renders the lines, so
 //! this command must relay the response BYTE-FOR-BYTE. Any local line splitting
@@ -18,14 +19,19 @@ pub async fn run(client: &Client, name: &str, allow_hazardous: bool) -> Result<(
     if allow_hazardous {
         path.push_str("?allow_hazardous=1");
     }
-    let step_up = super::key::prompt_step_up(client).await?;
+    // rev 41: only the hazardous override needs a step-up
+    let step_up = if allow_hazardous {
+        Some(super::key::prompt_step_up(client).await?)
+    } else {
+        None
+    };
     // The admin env route answers text/plain.
     let body = client
         .request_text(
             reqwest::Method::GET,
             RouteClass::SessionOnly,
             &path,
-            Some(&step_up),
+            step_up.as_deref(),
         )
         .await?;
 

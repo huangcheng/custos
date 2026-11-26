@@ -413,11 +413,23 @@ hist2 = c.get("/api/admin/items/e2e-hist/history", headers=admin_headers())
 check(hist2.status_code == 200 and len(hist2.json()["items"]) >= 1,
       "history survives the item soft-delete")
 
-# error precedence: step_up_required beats key_unavailable. Corrupt a field,
-# then reveal WITHOUT a step-up: the gate must win over the unreadable value.
-check(c.get("/api/admin/items/e2e-hist/reveal",
-            headers=admin_headers()).status_code == 401,
-      "reveal without step-up is 401 before any value materialisation")
+# rev 41 split: mutations keep the step-up, secret reads do not.
+# (Gate-before-materialisation with a CORRUPT field is covered by
+# tests/test_admin_items.py::test_hazardous_gate_fires_before_materialisation;
+# nothing in this script is corrupted.)
+_r = c.post("/api/admin/items/e2e-hist/restore",
+            headers={**admin_headers(), "x-csrf-token": _csrf})
+check(_r.status_code == 401 and _r.json().get("code") == "step_up_required",
+      f"restore without a step-up is 401 step_up_required (got {_r.status_code}: {_r.text[:100]})")
+_r = c.get("/api/admin/items/e2e-hist/reveal", headers=admin_headers())
+check(_r.status_code == 200 and "cu-test.hist-v2" in _r.text,
+      "session-only reveal returns the value with no step-up (rev 41)")
+# with the prompt gone the audit row is the only record of who read a value
+_aud = c.get("/api/admin/audit?action=reveal&item=e2e-hist", headers=admin_headers())
+check(_aud.status_code == 200 and any(
+    x.get("ok") and x.get("actor_kind") == "operator_session"
+    for x in _aud.json()["items"]),
+      "the session-only reveal is audited with the operator identity (rev 41)")
 
 # the four item caps each yield 413 over HTTP
 for label, body, want in [

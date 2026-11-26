@@ -5,8 +5,14 @@ principal has full item-plane authority (rev 38). Gates:
 - require_admin: cookie XOR co- bearer (both → 401); 300/min per principal.
 - require_session_only: tokens → 403 session_required BEFORE any state
   check (audited auth.failure); sessions consume a single step-up.
-- require_sensitive: session step-up OR allow_sensitive token; plain
-  tokens → 401 step_up_required (they may still step up interactively).
+- require_session_no_step_up: sessions only, no step-up (rev 39 — credential
+  mint/reveal); tokens → 403 session_required.
+- require_sensitive: secret READS (item/history reveal, plain admin env) —
+  an operator session with NO step-up, or an allow_sensitive token; a plain
+  token → 403 forbidden (rev 41).
+- require_sensitive_step_up: sensitive MUTATIONS (restore) — allow_sensitive
+  token, else a consumed step-up; require_step_up_for does the same for an
+  already-resolved principal (the hazardous-env override).
 Operator-token auth failures are audit-only (no lockout kind exists for
 them in the §5 closed list) and fail closed if the ledger is down.
 """
@@ -191,14 +197,36 @@ async def require_session_no_step_up(request: Request) -> AdminPrincipal:
 
 
 async def require_sensitive(request: Request) -> AdminPrincipal:
+    """Secret READS (item/history reveal, admin env): an operator session or
+    an allow_sensitive token — no step-up (rev 41 operator decision, same
+    rationale as rev 39). A PLAIN token is still refused: removing the
+    password prompt must not widen which credentials can read secrets.
+    Destructive and maintenance routes keep their step-up."""
+    principal = await require_admin(request)
+    if principal.actor_kind == "operator_token":
+        if not principal.allow_sensitive:
+            await _audit_denial(request, "forbidden", principal)
+            raise AppError("forbidden", "allow_sensitive token or operator session required")
+        request.state.allow_sensitive = True
+    return principal
+
+
+async def require_sensitive_step_up(request: Request) -> AdminPrincipal:
+    """The pre-rev-41 sensitive gate, kept for sensitive MUTATIONS (restore):
+    allow_sensitive token, else a valid presenter-bound step-up header."""
     principal = await require_admin(request)
     if principal.actor_kind == "operator_token" and principal.allow_sensitive:
         request.state.allow_sensitive = True
         return principal
-    # sessions AND plain tokens: a valid presenter-bound step-up header
-    # (a plain token may step up interactively; §5 binds step-ups to either)
     await _header_step_up(request, principal, consume=True)
     return principal
+
+
+async def require_step_up_for(request: Request, principal: AdminPrincipal) -> None:
+    """Consume a presenter-bound step-up for an ALREADY-resolved principal —
+    no second require_admin pass (which would re-verify the credential, tick
+    the rate limiter again and re-commit the session's last_seen)."""
+    await _header_step_up(request, principal, consume=True)
 
 
 @router.get("/ping")

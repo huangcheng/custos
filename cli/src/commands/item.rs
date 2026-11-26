@@ -17,7 +17,7 @@ pub enum ItemCommand {
     /// Read one item (secrets masked unless --reveal).
     Get {
         name: String,
-        /// Reveal secret values (needs step-up).
+        /// Reveal secret values (session only — rev 41, no step-up).
         #[arg(long)]
         reveal: bool,
     },
@@ -64,14 +64,14 @@ pub async fn run(client: &Client, cmd: ItemCommand, as_json: bool) -> Result<(),
         ItemCommand::Get { name, reveal } => {
             let path = format!("/api/admin/items/{}", Client::seg(&name));
             let body = if reveal {
-                let token = crate::commands::key::prompt_step_up(client).await?;
+                // rev 41: the session alone reveals — no step-up prompt
                 client
                     .request(
                         Method::GET,
                         RouteClass::SessionOnly,
                         &format!("{path}/reveal"),
                         None,
-                        Some(&token),
+                        None,
                     )
                     .await?
             } else {
