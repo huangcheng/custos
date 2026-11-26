@@ -14,13 +14,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from custos.errors import AppError
+from custos.names import ITEM_NAME_BODY, USERNAME_BODY
 
 FIELD_VALUE_MAX = 16 * 1024  # raw UTF-8 bytes
 NOTES_MAX = 4 * 1024  # raw UTF-8 bytes
 FIELDS_MAX = 32
 ITEM_MAX = 256 * 1024  # canonical escaped JSON bytes
 
-_ITEM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,199}\Z")
+_ITEM_NAME_RE = re.compile("^" + ITEM_NAME_BODY + r"\Z")
+_USERNAME_RE = re.compile("^" + USERNAME_BODY + r"\Z")
 _FIELD_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}\Z")
 
 
@@ -44,8 +46,17 @@ class Op:
 
 
 def valid_item_name(name: object) -> str | None:
-    """Canonical item-name check for audit attribution (one source of truth)."""
+    """Canonical item-name check for audit attribution (one source of truth).
+    Han ideographs are valid (rev 45); usernames stay ASCII-only."""
     if isinstance(name, str) and _ITEM_NAME_RE.match(name):
+        return name
+    return None
+
+
+def valid_username(name: object) -> str | None:
+    """Operator username grammar: ASCII-only, even though item names now
+    accept CJK (rev 45)."""
+    if isinstance(name, str) and _USERNAME_RE.match(name):
         return name
     return None
 

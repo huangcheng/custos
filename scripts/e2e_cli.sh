@@ -184,6 +184,21 @@ docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
   || fail "the mismatched purge deleted the item anyway"
 check "the mismatched purge left the item readable" 'grep -q "purge-mismatch" "$RUN_DIR/purge-mismatch-get.log"'
 
+echo "== a Chinese item name round-trips through the CLI"
+printf '%s' '[]' | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+  custos --url http://127.0.0.1:8300 item set "中文-密钥" --notes "中文备注" > "$RUN_DIR/set-cjk.log" 2>&1 \
+  || { cat "$RUN_DIR/set-cjk.log" >&2; fail "item set (Chinese name)"; }
+check "a Chinese item name is accepted" 'grep -qE "^revision 1$" "$RUN_DIR/set-cjk.log"'
+docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+  custos --url http://127.0.0.1:8300 item get "中文-密钥" > "$RUN_DIR/get-cjk.log" 2>&1 \
+  || fail "item get (Chinese name)"
+check "a Chinese item name round-trips through URL encoding" 'grep -q "中文-密钥" "$RUN_DIR/get-cjk.log"'
+check "the Chinese notes round-trip too" 'grep -q "中文备注" "$RUN_DIR/get-cjk.log"'
+printf '%s' '[]' | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+  custos --url http://127.0.0.1:8300 item set "密钥🚀" --notes "x" > "$RUN_DIR/set-cjk-bad.log" 2>&1 \
+  && fail "an out-of-grammar item name was accepted"
+check "an out-of-grammar name is still refused" 'grep -q "invalid item name" "$RUN_DIR/set-cjk-bad.log"'
+
 echo "== the exported value survives eval without executing"
 # The full §9 corpus, not just the quote shape: a newline, a CRLF and a
 # command substitution each get their own field.

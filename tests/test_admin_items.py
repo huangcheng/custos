@@ -247,3 +247,22 @@ async def test_rename_item(admin_stack) -> None:
             )).scalars().first()
             assert row is not None and row.item_name == "new-name"
             assert row.detail.get("from") == "old-name"
+
+
+async def test_cjk_item_names_round_trip(admin_stack) -> None:
+    """rev 45: the app grammar and the DB CHECK both accept Han ideographs."""
+    async with admin_stack() as (client, maker, h):
+        csrf = await h["login"](client)
+        hdr = {"x-csrf-token": csrf}
+        r = await client.post("/api/admin/items", headers=hdr, json=body("密钥配置"))
+        assert r.status_code == 201, r.text
+        assert (await client.get("/api/admin/items/密钥配置")).status_code == 200
+        r = await client.post("/api/admin/items/密钥配置/rename", headers=hdr,
+                              json={"name": "阿里云-密钥"})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "阿里云-密钥"
+        assert (await client.get("/api/admin/items/阿里云-密钥")).status_code == 200
+        # outside the grammar is still refused
+        for bad in ("BadName", "bad name", "密钥🚀"):
+            r = await client.post("/api/admin/items", headers=hdr, json=body(bad))
+            assert r.status_code == 422, bad

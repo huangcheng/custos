@@ -492,7 +492,7 @@ function ItemDrawer({
               label="New name"
               value={renameTo}
               onChange={setRenameTo}
-              hint="lowercase, digits, dot, dash, underscore — unsaved edits below are discarded"
+              hint="lowercase, digits, dot, dash, underscore, or Chinese characters — unsaved edits below are discarded"
             />
             <Button
               label="Apply rename"
@@ -508,7 +508,7 @@ function ItemDrawer({
             label="Name"
             value={form.name}
             onChange={(next) => setForm((prev) => ({ ...prev, name: next }))}
-            hint="lowercase, digits, dot, dash, underscore"
+            hint="lowercase, digits, dot, dash, underscore, or Chinese characters"
           />
         ) : null}
         <label>

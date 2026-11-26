@@ -24,7 +24,7 @@ from custos.config import MIN_PASSWORD_LEN, Settings
 from custos.crypto import digests_equal
 from custos.db.models import OperatorAccount
 from custos.errors import AppError
-from custos.limits import valid_item_name
+from custos.limits import valid_username
 
 _HASHER = PasswordHasher(
     time_cost=3,
@@ -155,7 +155,7 @@ async def setup_account(
             detail={"reason": "setup_complete"},
         )
         raise AppError("setup_complete", "setup already completed")
-    if valid_item_name(username) is None:
+    if valid_username(username) is None:
         raise AppError("invalid", "invalid username")
     validate_password(password)
     try:

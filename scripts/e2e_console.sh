@@ -665,7 +665,7 @@ ok(RESTORE === 200, `restore undeletes the item (status ${RESTORE})`);
 // note and a field so "nothing is lost" is actually tested. Its own item.
 {
   const REN_OLD = "zz-rename-old";
-  const REN_NEW = "zz-rename-new";
+  const REN_NEW = "zz-中文-改名";
   const csrf = await page.evaluate(async () =>
     (await (await fetch("/api/auth/status", { credentials: "same-origin" })).json()).csrf_token);
   await page.evaluate(async ({ item, csrf }) => {
@@ -713,7 +713,7 @@ ok(RESTORE === 200, `restore undeletes the item (status ${RESTORE})`);
     });
     return gone.status === 404;
   }, { oldName: REN_OLD, newName: REN_NEW }), "the renamed item");
-  ok(true, "Rename from the drawer moves the item to its new name");
+  ok(true, "Rename from the drawer accepts a Chinese name");
   // the row moved with its contents: note and field survived
   const moved = await page.evaluate(async ({ newName }) => {
     const r = await fetch(`/api/admin/items/${encodeURIComponent(newName)}`, {
