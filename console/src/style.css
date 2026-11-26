@@ -332,6 +332,9 @@ td.num, th.num { font-variant-numeric: tabular-nums; }
   animation: slide 220ms var(--ease);
 }
 
+.drawer.dialog { width: min(420px, 100%); }
+.dialog-copy { margin: 0; }
+
 .drawer-head {
   background: var(--ink);
   color: var(--text-on-ink);

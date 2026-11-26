@@ -105,11 +105,10 @@ async def test_purge_hard_deletes(admin_stack) -> None:
                          json=body(fields=[{"name": "KEY", "secret": True,
                                             "value": SENTINEL + "2"}]))
         await client.delete("/api/admin/items/lc", headers=hdr)
+        # rev 44: no step-up — but CSRF still guards the cross-site path
+        r = await client.delete("/api/admin/items/lc/purge")
+        assert r.status_code == 401
         r = await client.delete("/api/admin/items/lc/purge", headers=hdr)
-        assert r.status_code == 401  # no step-up
-        su = await h["step_up"](client, csrf)
-        r = await client.delete("/api/admin/items/lc/purge",
-                                headers={**hdr, "x-step-up-token": su})
         assert r.status_code == 204
         async with maker() as s:
             assert (await s.execute(select(func.count()).select_from(Item)
@@ -120,10 +119,8 @@ async def test_purge_hard_deletes(admin_stack) -> None:
         # name reusable
         r = await client.post("/api/admin/items", headers=hdr, json=body("lc"))
         assert r.status_code == 201
-        # absent → 404 with a valid gate
-        su = await h["step_up"](client, csrf)
-        r = await client.delete("/api/admin/items/ghost/purge",
-                                headers={**hdr, "x-step-up-token": su})
+        # absent → 404, no step-up needed
+        r = await client.delete("/api/admin/items/ghost/purge", headers=hdr)
         assert r.status_code == 404
 
 
@@ -138,9 +135,8 @@ async def test_degraded_restore_and_purge(admin_stack) -> None:
         r = await client.post("/api/admin/items/lc/restore",
                               headers={**hdr, "x-step-up-token": su})
         assert r.status_code == 200  # metadata-only: no decryption
-        su = await h["step_up"](client, csrf)
-        r = await client.delete("/api/admin/items/lc/purge",
-                                headers={**hdr, "x-step-up-token": su})
+        # rev 44: purge needs the session only
+        r = await client.delete("/api/admin/items/lc/purge", headers=hdr)
         assert r.status_code == 204
 
 

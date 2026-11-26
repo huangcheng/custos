@@ -307,6 +307,7 @@ async def purge(
     from custos.audit import add_audit_row
 
     # engine-level operator guard (mirrors force_drop): purge is session-only
+    # (rev 44 drops the step-up, not the no-token rule)
     if p.actor_kind != "operator_session":
         raise AppError("session_required", "purge is session-only")
     item = (

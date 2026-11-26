@@ -36,8 +36,14 @@ pub enum ItemCommand {
     Rm { name: String },
     /// Undelete a soft-deleted item.
     Restore { name: String },
-    /// Hard-delete an item and its history (session + step-up only).
-    Purge { name: String },
+    /// Hard-delete an item and its history (session only, no step-up — rev 44;
+    /// asks for the item name unless --yes).
+    Purge {
+        name: String,
+        /// Skip the name confirmation (required when stdin is not a terminal).
+        #[arg(long)]
+        yes: bool,
+    },
     /// Delete only unreadable rows of one item (session + step-up only).
     ForceDrop { name: String },
     /// Snapshot metadata for one item.
@@ -160,13 +166,26 @@ pub async fn run(client: &Client, cmd: ItemCommand, as_json: bool) -> Result<(),
                 .await?;
             println!("restored {name}");
         }
-        ItemCommand::Purge { name } => {
-            let token = crate::commands::key::prompt_step_up(client).await?;
+        ItemCommand::Purge { name, yes } => {
+            if !yes {
+                if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    return Err(CliError::Config(
+                        "refusing to purge without --yes when stdin is not a terminal".into(),
+                    ));
+                }
+                let typed = crate::commands::prompt_line(&format!(
+                    "type {name} to purge it and its whole history: "
+                ))?;
+                if typed != name {
+                    return Err(CliError::Config("purge cancelled".into()));
+                }
+            }
+            // rev 44: session only, no step-up prompt
             client
                 .delete(
                     RouteClass::SessionOnly,
                     &format!("/api/admin/items/{}/purge", Client::seg(&name)),
-                    Some(&token),
+                    None,
                 )
                 .await?;
             println!("purged {name}");

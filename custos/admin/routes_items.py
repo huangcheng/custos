@@ -15,6 +15,7 @@ from custos.admin.auth import (
     require_admin,
     require_sensitive,
     require_sensitive_step_up,
+    require_session_no_step_up,
     require_session_only,
     require_step_up_for,
 )
@@ -283,8 +284,9 @@ async def restore_one(
 @router.delete("/items/{name}/purge", status_code=204)
 async def purge_one(
     name: str, request: Request,
-    p: AdminPrincipal = Depends(require_session_only),
+    p: AdminPrincipal = Depends(require_session_no_step_up),
 ) -> Response:
+    """Hard delete (rev 44: session + CSRF, no step-up; bearer still 403)."""
     async with request.app.state.session_maker() as session:
         await purge(session, p, name)
         await session.commit()

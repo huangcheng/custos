@@ -6,7 +6,7 @@ principal has full item-plane authority (rev 38). Gates:
 - require_session_only: tokens → 403 session_required BEFORE any state
   check (audited auth.failure); sessions consume a single step-up.
 - require_session_no_step_up: sessions only, no step-up (rev 39 — credential
-  mint/reveal); tokens → 403 session_required.
+  mint/reveal; rev 44 — item purge); tokens → 403 session_required.
 - require_sensitive: secret READS (item/history reveal, plain admin env) —
   an operator session with NO step-up, or an allow_sensitive token; a plain
   token → 403 forbidden (rev 41).
@@ -190,9 +190,9 @@ async def require_session_only(request: Request) -> AdminPrincipal:
 
 async def require_session_no_step_up(request: Request) -> AdminPrincipal:
     """Interactive session, no step-up (rev 39: credential mint/reveal trust
-    the login). A bearer token — however flagged — gets the audited uniform
-    403 before any state check, so credential acquisition stays interactive
-    and the no-token-mints invariant holds."""
+    the login; rev 44: item purge does too). A bearer token — however
+    flagged — gets the audited uniform 403 before any state check, so
+    credential acquisition and hard deletion stay interactive."""
     return await _require_interactive_session(request)
 
 

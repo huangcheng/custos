@@ -7,6 +7,7 @@ type ButtonProps = {
   type?: "button" | "submit";
   disabled?: boolean;
   title?: string;
+  autoFocus?: boolean;
 };
 
 export function Button({
@@ -16,6 +17,7 @@ export function Button({
   type = "button",
   disabled,
   title,
+  autoFocus,
 }: ButtonProps) {
   const cls = variant === "plain" ? undefined : variant;
   return (
@@ -25,6 +27,7 @@ export function Button({
       onClick={onClick}
       disabled={disabled}
       title={title}
+      autoFocus={autoFocus}
     >
       {label}
     </button>

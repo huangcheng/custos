@@ -32,6 +32,33 @@ fail() { E2E_FAILED=1; echo "CLI GATE FAIL: $1" >&2; exit 1; }
 declare -i N=0
 check() { N+=1; if ! eval "$2"; then fail "CHECK $N ($1)"; fi; echo "CHECK $N: $1"; }
 
+# Run `custos item purge` with a real pty inside the container: docker exec -t
+# refuses a piped stdin, so fork a pty in Python and type into it.
+purge_via_pty() {
+  docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+    python3 - "$1" "$2" <<'PYEOF'
+import os, pty, sys
+item, typed = sys.argv[1], sys.argv[2]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp("custos", ["custos", "--url", "http://127.0.0.1:8300",
+                         "item", "purge", item])
+os.write(fd, (typed + "\n").encode())
+out = bytearray()
+while True:
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out.extend(chunk)
+_, status = os.waitpid(pid, 0)
+sys.stdout.buffer.write(out)
+sys.exit(os.waitstatus_to_exitcode(status))
+PYEOF
+}
+
 echo "== secrets"
 make_secrets_dir "$RUN_DIR"
 python3 - "$RUN_DIR" <<'PYEOF'
@@ -120,6 +147,42 @@ printf '%s\n' "$PW" | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-ap
   custos --url http://127.0.0.1:8300 env cli-item 2>/dev/null \
   | grep -E '^(export |# )' > "$RUN_DIR/env.log" || fail "env"
 check "env exports the secret" 'grep -q "export CLI_TOK=.\{0,1\}cu-test-cli-value" "$RUN_DIR/env.log"'
+
+echo "== purge asks for the name unless --yes"
+printf '%s' '[]' | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+  custos --url http://127.0.0.1:8300 item set purge-cli --notes "purge probe" > "$RUN_DIR/set-purge.log" 2>&1 \
+  || { cat "$RUN_DIR/set-purge.log" >&2; fail "item set (purge probe)"; }
+docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+  custos --url http://127.0.0.1:8300 item purge purge-cli > "$RUN_DIR/purge-no.log" 2>&1 \
+  && fail "purge without --yes was accepted on a non-TTY"
+check "purge without --yes is refused on a non-TTY" \
+  'grep -q "without --yes" "$RUN_DIR/purge-no.log"'
+docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+  custos --url http://127.0.0.1:8300 item purge --yes purge-cli > "$RUN_DIR/purge.log" 2>&1 \
+  || { cat "$RUN_DIR/purge.log" >&2; fail "item purge --yes"; }
+check "purge --yes hard-deletes the item" 'grep -q "purged purge-cli" "$RUN_DIR/purge.log"'
+docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+  custos --url http://127.0.0.1:8300 item get purge-cli > "$RUN_DIR/purge-get.log" 2>&1 \
+  && fail "a purged item is still readable"
+check "the purged item is gone" 'grep -q "not_found: not found" "$RUN_DIR/purge-get.log"'
+
+echo "== purge also confirms on a tty without --yes"
+printf '%s' '[]' | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+  custos --url http://127.0.0.1:8300 item set purge-prompt --notes "prompt probe" > "$RUN_DIR/set-prompt.log" 2>&1 \
+  || { cat "$RUN_DIR/set-prompt.log" >&2; fail "item set (prompt probe)"; }
+purge_via_pty purge-prompt purge-prompt > "$RUN_DIR/purge-prompt.log" 2>&1 \
+  || { cat "$RUN_DIR/purge-prompt.log" >&2; fail "interactive purge"; }
+check "typing the item name purges it" 'grep -q "purged purge-prompt" "$RUN_DIR/purge-prompt.log"'
+printf '%s' '[]' | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+  custos --url http://127.0.0.1:8300 item set purge-mismatch --notes "mismatch probe" > "$RUN_DIR/set-mismatch.log" 2>&1 \
+  || { cat "$RUN_DIR/set-mismatch.log" >&2; fail "item set (mismatch probe)"; }
+purge_via_pty purge-mismatch wrong-name > "$RUN_DIR/purge-mismatch.log" 2>&1 \
+  && fail "a mismatched name purged the item"
+check "a mismatched name cancels the purge" 'grep -q "purge cancelled" "$RUN_DIR/purge-mismatch.log"'
+docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+  custos --url http://127.0.0.1:8300 item get purge-mismatch > "$RUN_DIR/purge-mismatch-get.log" 2>&1 \
+  || fail "the mismatched purge deleted the item anyway"
+check "the mismatched purge left the item readable" 'grep -q "purge-mismatch" "$RUN_DIR/purge-mismatch-get.log"'
 
 echo "== the exported value survives eval without executing"
 # The full §9 corpus, not just the quote shape: a newline, a CRLF and a

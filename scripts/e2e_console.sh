@@ -222,6 +222,66 @@ const fillStepUp = (password, factor) => page.evaluate(({ password, factor }) =>
 const space = await taskSpace("custos-console-e2e");
 const page = await space.newPage(); // newPage() takes no label
 
+// Purge confirmation assertions shared by the list and nested-drawer entry
+// points: scopeSel is ".scrim" (list) or ".scrim .scrim" (inside the drawer).
+const expectPurgeConfirm = async (scopeSel, item, label) => {
+  await until(() => page.evaluate(({ scopeSel }) =>
+    !!document.querySelector(`${scopeSel} form`), { scopeSel }), `${label} confirmation`);
+  ok(await page.evaluate(({ scopeSel, item }) => {
+    const form = document.querySelector(`${scopeSel} form`);
+    const copy = form ? form.textContent || "" : "";
+    const active = document.activeElement;
+    return !!form && !form.querySelector("input[type=password]")
+      && copy.includes(item) && /cannot be undone/i.test(copy)
+      && !!active && form.contains(active) && active.textContent.trim() === "Cancel";
+  }, { scopeSel, item }),
+  `${label} confirmation names the item, warns it is irreversible, focuses Cancel and asks for no password`);
+};
+
+const escapePurgeConfirm = async (scopeSel, label) => {
+  await page.evaluate(({ scopeSel, label }) => {
+    const form = document.querySelector(`${scopeSel} form`);
+    if (!form) throw new Error(`${label} confirmation not open`);
+    const target = document.activeElement;
+    if (!(target instanceof Element) || !form.contains(target)) {
+      throw new Error(`focus left the ${label} confirmation`);
+    }
+    target.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+  }, { scopeSel, label });
+  await until(() => page.evaluate(({ scopeSel }) =>
+    document.querySelector(scopeSel) === null, { scopeSel }),
+    `${label} confirmation to close on Escape`);
+};
+
+// Click a button inside the row that names `item` (document-scoped Purge
+// clicks would hit the wrong row if another deleted probe were left behind).
+const clickRowButton = (item, reSource, label) => until(() => page.evaluate(
+  ({ item, reSource }) => {
+    const row = [...document.querySelectorAll("tr")]
+      .find((r) => r.textContent.includes(item));
+    if (!row) return false;
+    const re = new RegExp(reSource, "i");
+    const b = [...row.querySelectorAll("button")].find((x) => re.test(x.textContent));
+    if (b && !b.disabled) { b.click(); return true; }
+    return false;
+  }, { item, reSource }), label);
+
+// The drawer must stay open with its unsaved draft and the item still
+// soft-deleted after Escape or Cancel closes only the nested confirmation.
+const expectDrawerKept = async (item, note, label) => {
+  ok(await page.evaluate(async ({ item, note }) => {
+    const res = await fetch(`/api/admin/items/${encodeURIComponent(item)}`, {
+      credentials: "same-origin",
+    });
+    const drawer = document.querySelector(".scrim .drawer");
+    const area = document.querySelector(".scrim textarea");
+    return drawer !== null && area !== null && area.value === note
+      && res.status === 200 && (await res.json()).deleted === true;
+  }, { item, note }), label);
+};
+
 // 1. login page renders, then sign in
 await page.goto(`${BASE}/`);
 await page.evaluate(async () => {
@@ -425,17 +485,180 @@ ok(RESTORE === 200, `restore undeletes the item (status ${RESTORE})`);
     }, { item: PURGE_ITEM }),
     "a deleted row offers Purge in the list",
   );
-  await clickWhenReady("^Purge$", null, "purge the deleted row");
-  await until(() => page.evaluate(() => !!document.querySelector(".scrim form")), "purge step-up");
-  await fillStepUp(PW, null);
-  await clickWhenReady("^Continue$", ".scrim form", "purge step-up continue");
+  await clickRowButton(PURGE_ITEM, "^Purge$", "purge the deleted row");
+  await expectPurgeConfirm(".scrim", PURGE_ITEM, "purge");
+  await escapePurgeConfirm(".scrim", "purge");
+  ok(true, "Escape closes the purge confirmation");
+  await until(() => page.evaluate(async ({ item }) => {
+    const res = await fetch(`/api/admin/items/${encodeURIComponent(item)}`, {
+      credentials: "same-origin",
+    });
+    return res.status === 200 && (await res.json()).deleted === true;
+  }, { item: PURGE_ITEM }), "the item to survive an Escape-cancelled purge");
+  ok(true, "Escape cancelling keeps the item");
+  await clickRowButton(PURGE_ITEM, "^Purge$", "re-open the purge confirmation");
+  await until(() => page.evaluate(() => !!document.querySelector(".scrim form")), "purge confirmation again");
+  await clickWhenReady("^Cancel$", ".scrim form", "cancel the purge");
+  await until(() => page.evaluate(() => document.querySelector(".scrim") === null),
+    "the purge confirmation to close on Cancel");
+  ok(true, "Cancel closes the purge confirmation");
+  // failure path: the dialog stays open with the inline error and the item
+  await clickRowButton(PURGE_ITEM, "^Purge$", "re-open the purge for a failure test");
+  await expectPurgeConfirm(".scrim", PURGE_ITEM, "purge failure test");
+  try {
+    await page.evaluate(() => {
+      const original = window.fetch;
+      window.__custosFetch = original;
+      window.fetch = (input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (init?.method === "DELETE" && url.endsWith("/purge")) {
+          return new Promise((resolve) => {
+            window.__custosPurgeResolve = () => resolve(new Response(
+              JSON.stringify({ code: "internal_error", message: "synthetic purge failure" }),
+              { status: 500, headers: { "content-type": "application/json" } },
+            ));
+          });
+        }
+        return original(input, init);
+      };
+    });
+    await clickWhenReady("^Purge item$", ".scrim form", "attempt the failing purge");
+    await page.evaluate(() => {
+      const form = document.querySelector(".scrim form");
+      if (!form) throw new Error("purge confirmation closed early");
+      form.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    ok(await page.evaluate(() => !!document.querySelector(".scrim form")),
+      "Escape cannot dismiss the confirmation while the purge is in flight");
+    await page.evaluate(() => {
+      window.__custosPurgeResolve();
+    });
+    await until(() => page.evaluate(() => {
+      const form = document.querySelector(".scrim form");
+      return !!form && (form.textContent || "").includes("synthetic purge failure");
+    }), "the inline purge error");
+    ok(await page.evaluate(async ({ item }) => {
+      const form = document.querySelector(".scrim form");
+      const res = await fetch(`/api/admin/items/${encodeURIComponent(item)}`, {
+        credentials: "same-origin",
+      });
+      return !!form && res.status === 200 && (await res.json()).deleted === true;
+    }, { item: PURGE_ITEM }),
+    "a failed purge keeps the dialog open with the error and the item soft-deleted");
+  } finally {
+    await page.evaluate(() => {
+      if (window.__custosFetch) {
+        window.fetch = window.__custosFetch;
+        delete window.__custosFetch;
+      }
+      delete window.__custosPurgeResolve;
+    });
+  }
+  await clickWhenReady("^Cancel$", ".scrim form", "cancel after the failed purge");
+  await until(() => page.evaluate(() => document.querySelector(".scrim") === null),
+    "the failed purge dialog to close on Cancel");
+  await clickRowButton(PURGE_ITEM, "^Purge$", "re-open the purge for real");
+  await until(() => page.evaluate(() => !!document.querySelector(".scrim form")), "purge confirmation for the purge");
+  await clickWhenReady("^Purge item$", ".scrim form", "confirm the purge");
+  await until(() => page.evaluate(() => document.querySelector(".scrim") === null),
+    "the purge confirmation to close after a successful purge");
   await until(() => page.evaluate(async ({ item }) => {
     const res = await fetch(`/api/admin/items/${encodeURIComponent(item)}`, {
       credentials: "same-origin",
     });
     return res.status === 404;
   }, { item: PURGE_ITEM }), "the purged item to be gone");
+  await until(() => page.evaluate(({ item }) =>
+    ![...document.querySelectorAll("tr")].some((r) => r.textContent.includes(item)),
+    { item: PURGE_ITEM }), "the purged row to disappear from the list");
+  ok(true, "the purged row leaves the list without a manual reload");
   ok(true, "Purge from the list removes the deleted item for good");
+}
+
+// 6b-2. the drawer entry point runs its own confirm inside the item Drawer
+// (nested scrim): it must need no password either and close the drawer after.
+{
+  const PURGE_DRAWER = "zz-purge-drawer";
+  const csrf = await page.evaluate(async () =>
+    (await (await fetch("/api/auth/status", { credentials: "same-origin" })).json()).csrf_token);
+  await page.evaluate(async ({ item, csrf }) => {
+    await fetch("/api/admin/items", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json", "x-csrf-token": csrf },
+      body: JSON.stringify({ name: item, notes: "", fields: [] }),
+    });
+    await fetch(`/api/admin/items/${encodeURIComponent(item)}`, {
+      method: "DELETE", credentials: "same-origin",
+      headers: { "x-csrf-token": csrf },
+    });
+  }, { item: PURGE_DRAWER, csrf });
+  await page.goto(`${BASE}/items`);
+  await until(() => page.evaluate(({ item }) =>
+    [...document.querySelectorAll("tr")].some((r) =>
+      r.textContent.includes(item) && /deleted/.test(r.textContent)), { item: PURGE_DRAWER }),
+    "the drawer purge-probe row");
+  await page.evaluate(({ item }) => {
+    const row = [...document.querySelectorAll("tr")]
+      .find((r) => r.textContent.includes(item));
+    if (!row) throw new Error("deleted row not found");
+    const open = [...row.querySelectorAll("button")]
+      .find((b) => /^Open$/.test(b.textContent.trim()));
+    if (!open) throw new Error("deleted row has no Open button");
+    open.click();
+  }, { item: PURGE_DRAWER });
+  // wait for the item to load (the Purge button only renders once it has),
+  // then type into Notes: the nested confirm must not disturb drawer state
+  await until(() => page.evaluate(() => {
+    const drawer = document.querySelector(".scrim .drawer");
+    return !!drawer && [...drawer.querySelectorAll("button")]
+      .some((b) => /^Purge$/.test(b.textContent.trim()));
+  }), "the deleted item to load in the drawer");
+  const NOTE = "unsaved draft survives the confirmation";
+  await page.evaluate(({ note }) => {
+    const set = (el, v) => {
+      const s = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype, "value").set;
+      s.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const area = document.querySelector(".scrim textarea");
+    if (!area) throw new Error("drawer notes textarea missing");
+    set(area, note);
+  }, { note: NOTE });
+  await clickWhenReady("^Purge$", ".drawer", "purge from the drawer");
+  await expectPurgeConfirm(".scrim .scrim", PURGE_DRAWER, "drawer purge");
+  await escapePurgeConfirm(".scrim .scrim", "drawer purge");
+  await expectDrawerKept(
+    PURGE_DRAWER, NOTE,
+    "Escape closes only the confirmation, keeping the drawer, its unsaved edits and the item",
+  );
+  await clickWhenReady("^Purge$", ".drawer", "re-open the drawer purge for cancel");
+  await until(() => page.evaluate(() => !!document.querySelector(".scrim .scrim form")), "drawer purge confirmation for cancel");
+  await clickWhenReady("^Cancel$", ".scrim .scrim form", "cancel the drawer purge");
+  await until(() => page.evaluate(() => document.querySelector(".scrim .scrim") === null),
+    "the drawer purge confirmation to close on cancel");
+  await expectDrawerKept(
+    PURGE_DRAWER, NOTE,
+    "cancelling keeps the drawer open, its unsaved edits and the item soft-deleted",
+  );
+  await clickWhenReady("^Purge$", ".drawer", "re-open the drawer purge");
+  await until(() => page.evaluate(() => !!document.querySelector(".scrim .scrim form")), "drawer purge confirmation again");
+  await clickWhenReady("^Purge item$", ".scrim .scrim form", "confirm the drawer purge");
+  await until(() => page.evaluate(async ({ item }) => {
+    const res = await fetch(`/api/admin/items/${encodeURIComponent(item)}`, {
+      credentials: "same-origin",
+    });
+    return res.status === 404;
+  }, { item: PURGE_DRAWER }), "the drawer-purged item to be gone");
+  await until(() => page.evaluate(() => document.querySelector(".scrim") === null),
+    "the drawer to close after its purge");
+  await until(() => page.evaluate(({ item }) =>
+    ![...document.querySelectorAll("tr")].some((r) => r.textContent.includes(item)),
+    { item: PURGE_DRAWER }), "the drawer-purged row to leave the list");
+  ok(true, "the drawer-purged row leaves the list without a manual reload");
+  ok(true, "the drawer closes after its purge");
 }
 
 // 6c. rename from the drawer: only the name moves — the probe carries a

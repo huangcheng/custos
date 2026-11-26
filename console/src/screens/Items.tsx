@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, status } from "../api";
 import { Button, Notice, TextField } from "../components/Field";
+import { Confirm } from "../components/Confirm";
 import { ConfirmStepUp } from "../components/ConfirmStepUp";
 import { Drawer } from "../components/Drawer";
 import {
@@ -16,6 +17,68 @@ import type { HistoryRow, HistorySnapshot, Item, ListRow, Page } from "../types"
 
 const PAGE = 50;
 
+// The one purge request both entry points use, so the route cannot drift.
+async function purgeRequest(name: string): Promise<void> {
+  await api("DELETE", `/api/admin/items/${encodeURIComponent(name)}/purge`);
+}
+
+// One purge state machine for both entry points: busy clears before onDone
+// runs, so a dialog dismissed on success never leaves the next one disabled
+// while the list reloads. `running` makes a rapid second click a no-op (the
+// action stays enabled so disabling it cannot throw focus out of the dialog).
+function usePurge(onDone: () => void) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const running = useRef(false);
+  const reset = () => setError("");
+  const run = async (name: string) => {
+    if (running.current) return;
+    running.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      await purgeRequest(name);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "purge failed");
+      return;
+    } finally {
+      running.current = false;
+      setBusy(false);
+    }
+    onDone();
+  };
+  return { busy, error, run, reset };
+}
+
+// One purge confirmation for both entry points (list row and drawer) so the
+// irreversible copy cannot drift between them.
+function PurgeConfirm({
+  name,
+  busy,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  name: string;
+  busy: boolean;
+  error: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Confirm
+      title="Purge item"
+      message={`Permanently deletes "${name}", its fields and its whole history. This cannot be undone.`}
+      confirmLabel="Purge item"
+      destructive
+      busy={busy}
+      error={error}
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+    />
+  );
+}
+
 export function Items({ onSignOut }: { onSignOut: () => void }) {
   const [rows, setRows] = useState<ListRow[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -26,15 +89,6 @@ export function Items({ onSignOut }: { onSignOut: () => void }) {
   // a soft-deleted row must be removable from the list itself, without
   // opening the drawer first
   const [purge, setPurge] = useState<null | { name: string }>(null);
-  const [purgeTotp, setPurgeTotp] = useState(false);
-
-  useEffect(() => {
-    void status()
-      .then((st) => setPurgeTotp(st.totp_required))
-      .catch(() => {
-        // the prompt still works password-only; never block the list on it
-      });
-  }, []);
 
   const generation = useRef(0);
 
@@ -74,17 +128,10 @@ export function Items({ onSignOut }: { onSignOut: () => void }) {
     void load(null);
   }, [load]);
 
-  const purgeItem = async (name: string, token: string) => {
-    setError("");
-    try {
-      await api("DELETE", `/api/admin/items/${encodeURIComponent(name)}/purge`, undefined, {
-        stepUpToken: token,
-      });
-      await load(null);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "purge failed");
-    }
-  };
+  const purgeState = usePurge(() => {
+    setPurge(null);
+    void load(null);
+  });
 
   return (
     <>
@@ -136,7 +183,10 @@ export function Items({ onSignOut }: { onSignOut: () => void }) {
                           <Button
                             label="Purge"
                             variant="danger"
-                            onClick={() => setPurge({ name: row.name })}
+                            onClick={() => {
+                              purgeState.reset();
+                              setPurge({ name: row.name });
+                            }}
                           />
                         </>
                       ) : null}
@@ -168,16 +218,16 @@ export function Items({ onSignOut }: { onSignOut: () => void }) {
         />
       ) : null}
       {purge ? (
-        <ConfirmStepUp
-          totpRequired={purgeTotp}
-          title="Purge item"
-          message={`Permanently deletes "${purge.name}", its fields and its whole history. This cannot be undone.`}
-          onCancel={() => setPurge(null)}
-          onToken={async (token) => {
-            const target = purge.name;
+        <PurgeConfirm
+          name={purge.name}
+          busy={purgeState.busy}
+          error={purgeState.error}
+          onCancel={() => {
+            if (purgeState.busy) return;
             setPurge(null);
-            await purgeItem(target, token);
+            purgeState.reset();
           }}
+          onConfirm={() => void purgeState.run(purge.name)}
         />
       ) : null}
       {open ? (
@@ -223,6 +273,11 @@ function ItemDrawer({
   const [busy, setBusy] = useState(false);
   const [stepUpFor, setStepUpFor] = useState<null | ((token: string) => Promise<void>)>(null);
   const [totpRequired, setTotpRequired] = useState(false);
+  const [confirmPurge, setConfirmPurge] = useState(false);
+  const purgeState = usePurge(() => {
+    setConfirmPurge(false);
+    onSaved();
+  });
 
   useEffect(() => {
     void status()
@@ -378,18 +433,10 @@ function ItemDrawer({
     );
   };
 
-  const remove = async (purge: boolean) => {
+  const remove = async () => {
     if (!existing) return; // never build an //items// path
-    const path = `/api/admin/items/${encodeURIComponent(existing)}${purge ? "/purge" : ""}`;
-    if (purge) {
-      setStepUpFor(() => async (token: string) => {
-        await api("DELETE", path, undefined, { stepUpToken: token });
-        onSaved();
-      });
-      return;
-    }
     try {
-      await api("DELETE", path);
+      await api("DELETE", `/api/admin/items/${encodeURIComponent(existing)}`);
       onSaved();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "delete failed");
@@ -559,7 +606,7 @@ function ItemDrawer({
               <Button
                 label="Delete"
                 variant="danger"
-                onClick={() => void remove(false)}
+                onClick={() => void remove()}
               />
             </>
           ) : null}
@@ -567,7 +614,14 @@ function ItemDrawer({
             <Button label="Restore" onClick={() => void restore()} />
           ) : null}
           {item?.deleted ? (
-            <Button label="Purge" variant="danger" onClick={() => void remove(true)} />
+            <Button
+              label="Purge"
+              variant="danger"
+              onClick={() => {
+                purgeState.reset();
+                setConfirmPurge(true);
+              }}
+            />
           ) : null}
         </div>
         {history ? (
@@ -608,6 +662,19 @@ function ItemDrawer({
           </div>
         ) : null}
       </div>
+      {confirmPurge && existing ? (
+        <PurgeConfirm
+          name={existing}
+          busy={purgeState.busy}
+          error={purgeState.error}
+          onCancel={() => {
+            if (purgeState.busy) return;
+            setConfirmPurge(false);
+            purgeState.reset();
+          }}
+          onConfirm={() => void purgeState.run(existing)}
+        />
+      ) : null}
       {stepUpFor ? (
         <ConfirmStepUp
           totpRequired={totpRequired}
