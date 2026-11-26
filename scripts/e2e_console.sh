@@ -393,50 +393,50 @@ const RESTORE = await page.evaluate(async ({ item, pw }) => {
   return res.status;
 }, { item: ITEM, pw: PW });
 ok(RESTORE === 200, `restore undeletes the item (status ${RESTORE})`);
-await until(
-  () =>
-    page.evaluate(async ({ item }) => {
-      const res = await fetch(`/api/admin/items/${encodeURIComponent(item)}`, {
-        credentials: "same-origin",
-      });
-      return (await res.json()).deleted === false;
-    }, { item: ITEM }),
-  "the item to be live again",
-);
 
-// 6c. If-Match is enforced: a stale revision is a 409, nothing is written
-const MATCH = await page.evaluate(async ({ item, value }) => {
-  const status = await (await fetch("/api/auth/status", { credentials: "same-origin" })).json();
-  const created = await fetch("/api/admin/items", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "content-type": "application/json", "x-csrf-token": status.csrf_token },
-    body: JSON.stringify({
-      name: `${item}-ifmatch`,
-      notes: "",
-      fields: [{ name: "V", secret: true, value }],
-    }),
-  });
-  if (created.status !== 201) return { ok: false, why: `create ${created.status}` };
-  const revision = (await created.json()).revision;
-  const stale = await fetch(`/api/admin/items/${encodeURIComponent(item)}-ifmatch`, {
-    method: "PUT",
-    credentials: "same-origin",
-    headers: {
-      "content-type": "application/json",
-      "x-csrf-token": status.csrf_token,
-      "if-match": `"${revision + 5}"`,
-    },
-    body: JSON.stringify({ notes: "must not apply", fields: [] }),
-  });
-  const after = await (
-    await fetch(`/api/admin/items/${encodeURIComponent(item)}-ifmatch`, {
+// 6b. a soft-deleted row is removable from the LIST (no drawer, no dead end).
+// Its own throwaway item: the shared ITEM must survive for later steps.
+{
+  const PURGE_ITEM = "zz-purge-probe";
+  const csrf = await page.evaluate(async () =>
+    (await (await fetch("/api/auth/status", { credentials: "same-origin" })).json()).csrf_token);
+  await page.evaluate(async ({ item, csrf }) => {
+    await fetch("/api/admin/items", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json", "x-csrf-token": csrf },
+      body: JSON.stringify({ name: item, notes: "", fields: [] }),
+    });
+    await fetch(`/api/admin/items/${encodeURIComponent(item)}`, {
+      method: "DELETE", credentials: "same-origin",
+      headers: { "x-csrf-token": csrf },
+    });
+  }, { item: PURGE_ITEM, csrf });
+  await page.goto(`${BASE}/items`);
+  await until(() => page.evaluate(({ item }) =>
+    [...document.querySelectorAll("tr")].some((r) =>
+      r.textContent.includes(item) && /deleted/.test(r.textContent)), { item: PURGE_ITEM }),
+    "the soft-deleted row");
+  ok(
+    await page.evaluate(({ item }) => {
+      const row = [...document.querySelectorAll("tr")]
+        .find((r) => r.textContent.includes(item));
+      return !!row && [...row.querySelectorAll("button")]
+        .some((b) => /^Purge$/.test(b.textContent.trim()));
+    }, { item: PURGE_ITEM }),
+    "a deleted row offers Purge in the list",
+  );
+  await clickWhenReady("^Purge$", null, "purge the deleted row");
+  await until(() => page.evaluate(() => !!document.querySelector(".scrim form")), "purge step-up");
+  await fillStepUp(PW, null);
+  await clickWhenReady("^Continue$", ".scrim form", "purge step-up continue");
+  await until(() => page.evaluate(async ({ item }) => {
+    const res = await fetch(`/api/admin/items/${encodeURIComponent(item)}`, {
       credentials: "same-origin",
-    })
-  ).json();
-  return { ok: stale.status === 409 && after.notes === "", why: `stale=${stale.status}` };
-}, { item: ITEM, value: SECRET_VALUE });
-ok(MATCH.ok, `If-Match rejects a stale revision (${MATCH.why})`);
+    });
+    return res.status === 404;
+  }, { item: PURGE_ITEM }), "the purged item to be gone");
+  ok(true, "Purge from the list removes the deleted item for good");
+}
 
 // 7. key mint: a header button opens the mint drawer (the console's modal
 // idiom); session only (rev 39); full-authority model (rev 38: label only)

@@ -23,6 +23,18 @@ export function Items({ onSignOut }: { onSignOut: () => void }) {
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  // a soft-deleted row must be removable from the list itself, without
+  // opening the drawer first
+  const [purge, setPurge] = useState<null | { name: string }>(null);
+  const [purgeTotp, setPurgeTotp] = useState(false);
+
+  useEffect(() => {
+    void status()
+      .then((st) => setPurgeTotp(st.totp_required))
+      .catch(() => {
+        // the prompt still works password-only; never block the list on it
+      });
+  }, []);
 
   const generation = useRef(0);
 
@@ -61,6 +73,18 @@ export function Items({ onSignOut }: { onSignOut: () => void }) {
   useEffect(() => {
     void load(null);
   }, [load]);
+
+  const purgeItem = async (name: string, token: string) => {
+    setError("");
+    try {
+      await api("DELETE", `/api/admin/items/${encodeURIComponent(name)}/purge`, undefined, {
+        stepUpToken: token,
+      });
+      await load(null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "purge failed");
+    }
+  };
 
   return (
     <>
@@ -106,6 +130,16 @@ export function Items({ onSignOut }: { onSignOut: () => void }) {
                     <td className="mono muted">{row.updated_at.slice(0, 19).replace("T", " ")}</td>
                     <td>
                       <Button label="Open" variant="ghost" onClick={() => setOpen(row.name)} />
+                      {row.deleted ? (
+                        <>
+                          {" "}
+                          <Button
+                            label="Purge"
+                            variant="danger"
+                            onClick={() => setPurge({ name: row.name })}
+                          />
+                        </>
+                      ) : null}
                     </td>
                   </tr>
                 );
@@ -130,6 +164,19 @@ export function Items({ onSignOut }: { onSignOut: () => void }) {
           onSaved={() => {
             setCreating(false);
             void load(null);
+          }}
+        />
+      ) : null}
+      {purge ? (
+        <ConfirmStepUp
+          totpRequired={purgeTotp}
+          title="Purge item"
+          message={`Permanently deletes "${purge.name}", its fields and its whole history. This cannot be undone.`}
+          onCancel={() => setPurge(null)}
+          onToken={async (token) => {
+            const target = purge.name;
+            setPurge(null);
+            await purgeItem(target, token);
           }}
         />
       ) : null}
@@ -164,9 +211,6 @@ function ItemDrawer({
   // cannot fire overlapping requests (and give the button a busy state)
   const [revealing, setRevealing] = useState(false);
   const [revealError, setRevealError] = useState("");
-  const [history, setHistory] = useState<HistoryRow[] | null>(null);
-  const [historyCursor, setHistoryCursor] = useState<string | null>(null);
-  const [snapshot, setSnapshot] = useState<{ name: string; value: string } | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [stepUpFor, setStepUpFor] = useState<null | ((token: string) => Promise<void>)>(null);
@@ -180,6 +224,10 @@ function ItemDrawer({
         setError(err instanceof ApiError ? err.message : "cannot read auth status");
       });
   }, []);
+
+  const [history, setHistory] = useState<HistoryRow[] | null>(null);
+  const [historyCursor, setHistoryCursor] = useState<string | null>(null);
+  const [snapshot, setSnapshot] = useState<{ name: string; value: string } | null>(null);
 
   useEffect(() => {
     // Reset FIRST: a stale form + the previous item's revision must never be
