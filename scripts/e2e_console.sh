@@ -669,9 +669,67 @@ ok(
   }),
   "the enrolment QR is a real matrix (modules + quiet zone), not a placeholder",
 );
-// step 11 overwrites this unconfirmed enrolment with its own /totp/setup,
-// so there is no pending state to discard here
-await page.goto(`${BASE}/items`);
+// step 11 overwrites this unconfirmed enrolment with its own /totp/setup
+
+// 10c. design invariants (DESIGN.md), checked on every table page: one
+// accent derived from the token, no acid-green anywhere, one control height,
+// exactly the table card elevated, sentence-case 13px headers.
+const designProbe = () => page.evaluate(() => {
+  const cs = (el) => getComputedStyle(el);
+  const probe = document.createElement("div");
+  probe.style.backgroundColor =
+    cs(document.documentElement).getPropertyValue("--accent").trim();
+  document.body.appendChild(probe);
+  const accent = cs(probe).backgroundColor;
+  probe.remove();
+  const acid = "rgb(200, 247, 81)";
+  const limeTint = "rgb(242, 252, 217)";
+  const limes = [];
+  for (const el of document.querySelectorAll("body *")) {
+    const st = cs(el);
+    for (const prop of ["backgroundColor", "color", "borderTopColor", "borderBottomColor"]) {
+      if (st[prop] === acid || st[prop] === limeTint) limes.push(`${el.tagName}.${prop}`);
+    }
+  }
+  const ths = [...document.querySelectorAll("table th")];
+  const caps = ths
+    .map((t) => t.textContent.trim())
+    .filter((t) => /[A-Z]{3,}/.test(t) && t === t.toUpperCase());
+  const heights = [...new Set([...document.querySelectorAll("button")]
+    .map((b) => b.getBoundingClientRect().height))];
+  const elevated = [...document.querySelectorAll(".card")]
+    .filter((c) => cs(c).boxShadow !== "none");
+  const primary = document.querySelector("button.primary");
+  return {
+    accent,
+    primary: primary ? cs(primary).backgroundColor : null,
+    limes,
+    caps,
+    heights,
+    elevated: elevated.length,
+    tableElevated: elevated.length === 1 && !!elevated[0].querySelector(":scope > table"),
+    thSize: ths.length ? cs(ths[0]).fontSize : null,
+  };
+});
+for (const route of ["/items", "/audit"]) {
+  await page.goto(`${BASE}${route}`);
+  await until(() => page.evaluate(() => !!document.querySelector("table th")), `the ${route} table`);
+  const d = await designProbe();
+  ok(!d.primary || d.primary === d.accent, `${route}: the primary action uses the accent token`);
+  ok(d.limes.length === 0, `${route}: no acid-green anywhere (${d.limes.slice(0, 3).join(",")})`);
+  ok(
+    d.heights.every((h) => h >= 36 && h <= 38),
+    `${route}: one control height ~36px (got ${JSON.stringify(d.heights)})`,
+  );
+  ok(
+    d.elevated === 1 && d.tableElevated,
+    `${route}: only the table card is elevated (elevated=${d.elevated}, table=${d.tableElevated})`,
+  );
+  ok(
+    d.thSize === "13px" && d.caps.length === 0,
+    `${route}: sentence-case 13px headers (all-caps: ${JSON.stringify(d.caps.slice(0, 3))})`,
+  );
+}
 
 // 11. TOTP two-step sign-in (rev 37 login UX): enable TOTP through the real
 // API, log out, and prove the credentials→code advance is client-side (no

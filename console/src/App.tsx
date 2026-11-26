@@ -192,6 +192,18 @@ export function App() {
 
   return (
     <div className="app">
+      <a
+        className="skip"
+        href="#main"
+        onClick={(event) => {
+          // never write "#main" into the URL: /device reads the fragment as a
+          // device code, so a refresh there would look up the wrong code
+          event.preventDefault();
+          document.getElementById("main")?.focus();
+        }}
+      >
+        Skip to content
+      </a>
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">
@@ -225,7 +237,7 @@ export function App() {
           </button>
         </div>
       </aside>
-      <main className="workspace">
+      <main className="workspace" id="main" tabIndex={-1}>
         {/* A minted secret must survive a route change: it lives above the
             screens, not inside one. */}
         {oneTime.oneTime ? (
