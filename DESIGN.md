@@ -86,6 +86,11 @@ identifiers truncate with `title`.
 - **Audit detail** renders as an ink code block behind a keyboard-reachable
   row toggle.
 - **Stats** sit in a labelled grid (`dl.stats`), counts in tabular numerals.
+- **Login**: the Turnstile widget spans the form like every control
+  (`size: flexible`), renders only when Cloudflare needs a click
+  (`appearance: interaction-only`), and matches the console (light, English)
+  — never the stock 300×65 box between the password and the button. The
+  alternative sign-in routes are centred text actions under the primary button.
 
 ## Rules
 

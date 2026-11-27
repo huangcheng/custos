@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useState } from "react";
+import { Fragment, useCallback, useRef, useState } from "react";
 import { ApiError, api, setCsrf, setCsrf as rememberCsrf } from "../api";
 import { Button, Notice, TextField } from "../components/Field";
 import { LoginInputError, loginPayload, setupPayload } from "../login";
@@ -18,7 +18,17 @@ type TurnstileWindow = Window & {
   turnstile?: {
     render: (
       el: HTMLElement,
-      opts: { sitekey: string; callback: (token: string) => void },
+      opts: {
+        sitekey: string;
+        callback: (token: string) => void;
+        "expired-callback"?: () => void;
+        "error-callback"?: () => void;
+        size?: "normal" | "flexible" | "compact";
+        execution?: "render" | "execute";
+        appearance?: "always" | "execute" | "interaction-only";
+        theme?: "light" | "dark" | "auto";
+        language?: string;
+      },
     ) => void;
   };
 };
@@ -27,6 +37,7 @@ type TurnstileWindow = Window & {
 // unconfigured deployment never phones home to a third party (§5).
 function useTurnstile(sitekey: string | null) {
   const [token, setToken] = useState("");
+  const observers = useRef<ResizeObserver | null>(null);
   const attach = useCallback(
     (node: HTMLDivElement | null) => {
       if (!node || !sitekey) return;
@@ -34,7 +45,37 @@ function useTurnstile(sitekey: string | null) {
       const render = () => {
         if (!w.turnstile) return;
         node.replaceChildren();
-        w.turnstile.render(node, { sitekey, callback: setToken });
+        // The stock widget is a 300×65 box in the browser's locale. The
+        // console is English and its form is always light, so the widget
+        // matches both; it spans the form like every other control and stays
+        // out of the flow until Cloudflare actually needs a click — the
+        // "Verifying…" spinner never sits between the password and the button.
+        w.turnstile.render(node, {
+          sitekey,
+          callback: setToken,
+          // a response lives ~5 minutes and this form can outlive it (password,
+          // then a TOTP code): never keep a dead token that the server would
+          // reject — a rejected submit costs a lockout row on valid credentials
+          "expired-callback": () => setToken(""),
+          "error-callback": () => setToken(""),
+          size: "flexible",
+          appearance: "interaction-only",
+          theme: "light",
+          language: "en",
+        });
+        // interaction-only keeps the widget at zero height until Cloudflare
+        // needs a click. The host mirrors that state on itself so the submit
+        // button can sit 16px below the last field normally, and only take
+        // extra room when a challenge is actually on screen (the widget is
+        // never hidden — hiding a Turnstile container risks the "inconsistent
+        // visibility" error when it later needs to show a challenge).
+        const sync = () => {
+          node.classList.toggle("challenging", node.getBoundingClientRect().height > 0);
+        };
+        observers.current?.disconnect();
+        observers.current = new ResizeObserver(sync);
+        observers.current.observe(node);
+        sync();
       };
       if (w.turnstile) {
         render();
@@ -197,6 +238,13 @@ export function Login({ status, onAuthenticated }: Props) {
     submitLabel = "Continue";
   }
 
+  // One mount point for the widget: the code step for TOTP, the credentials
+  // step for password-only and passkey logins (assert/verify also needs the
+  // token). Both branches render this same element, so they cannot drift.
+  const turnstileHost = status.turnstile_sitekey ? (
+    <div key={turnstile.epoch} ref={turnstile.attach} className="turnstile-host" />
+  ) : null;
+
   return (
     <div className="auth">
       <div className="auth-brand">
@@ -247,9 +295,11 @@ export function Login({ status, onAuthenticated }: Props) {
                 autoComplete="one-time-code"
                 autoFocus
               />
-              <div key={turnstile.epoch} ref={turnstile.attach} />
-              <Button label="Sign in" variant="primary" type="submit" disabled={busy} />
-              <div className="row">
+              <div className="auth-submit">
+                {turnstileHost}
+                <Button label="Sign in" variant="primary" type="submit" disabled={busy} />
+              </div>
+              <div className="row auth-secondary">
                 <button
                   type="button"
                   className="ghost"
@@ -323,16 +373,25 @@ export function Login({ status, onAuthenticated }: Props) {
                   step for TOTP, the credentials step for password-only and
                   passkey logins (assert/verify also requires the token) */}
               {!setup && (!status.totp_required || status.passkey_available) ? (
-                <div key={turnstile.epoch} ref={turnstile.attach} />
-              ) : null}
-              <Button
-                label={submitLabel}
-                variant="primary"
-                type="submit"
-                disabled={busy}
-              />
+                <div className="auth-submit">
+                  {turnstileHost}
+                  <Button
+                    label={submitLabel}
+                    variant="primary"
+                    type="submit"
+                    disabled={busy}
+                  />
+                </div>
+              ) : (
+                <Button
+                  label={submitLabel}
+                  variant="primary"
+                  type="submit"
+                  disabled={busy}
+                />
+              )}
               {!setup ? (
-                <div className="row">
+                <div className="row auth-secondary">
                   {/* recovery is a TOTP fallback: on the code step when TOTP is
                       enabled; inline here only in the TOTP-off recovery window */}
                   {!status.totp_required && status.recovery_available ? (

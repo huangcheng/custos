@@ -1008,6 +1008,16 @@ tr.clickable { cursor: pointer; }
 .auth-lede { margin: 0 0 12px; font-size: 13.5px; line-height: 1.6; color: var(--text-dim); }
 .auth-form input:not([type="checkbox"]) { height: 48px; }
 .auth-form .primary { width: 100%; height: 48px; }
+/* alternative sign-in routes sit centred under the primary action, as text */
+.auth-secondary { justify-content: center; }
+.auth-secondary .ghost { padding: 0 10px; font-weight: 550; }
+/* the human-verification widget spans the form like every control and only
+   occupies space when Cloudflare asks for a click (interaction-only). It
+   shares the submit block, so its zero height adds no flex gap; a challenge
+   (host measured non-zero) buys 12px above the button. */
+.turnstile-host { display: flex; flex-direction: column; width: 100%; }
+.auth-submit { display: flex; flex-direction: column; }
+.auth-submit .turnstile-host.challenging + .primary { margin-top: 12px; }
 
 /* ---------- states ---------- */
 
