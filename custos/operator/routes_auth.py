@@ -138,8 +138,12 @@ async def passkey_reg_verify(
 
 @router.get("/passkeys")
 async def passkey_list(
-    request: Request, sess: OperatorSession = _STEP_UP_PASSKEY
+    request: Request, sess: OperatorSession = Depends(require_session)
 ) -> dict[str, Any]:
+    """Registered passkeys as metadata (id + label): session only, no step-up
+    (rev 47) — the same friction removal as the credential inventories. The
+    labels are not usable elsewhere, so the read is not audited; removal
+    below keeps its step-up."""
     from custos.db.models import PasskeyCredential
 
     _passkeys_enabled(request)

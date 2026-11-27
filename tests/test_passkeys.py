@@ -230,6 +230,42 @@ async def test_passkey_register_and_login_http(pk_http) -> None:
         assert "custos_session" in client.cookies
 
 
+async def test_passkey_list_needs_no_step_up_but_remove_does(pk_http) -> None:
+    """rev 47: listing registered passkeys is a session-only read; removal
+    keeps its step-up (the register/list/remove split mirrors the credential
+    inventories: reads without a prompt, destructive writes with one)."""
+    from webauthn.helpers.base64url_to_bytes import base64url_to_bytes
+
+    async with pk_http() as (client, maker, csrf, app):
+        su = await client.post("/api/auth/step-up", headers={"x-csrf-token": csrf},
+                               json={"password": "cu-test-password-12ch"})
+        h = {"x-csrf-token": csrf, "x-step-up-token": su.json()["step_up_token"]}
+        opts = (await client.post("/api/auth/passkeys/register/options", headers=h, json={})).json()
+        cred = SoftAuthenticator().register(base64url_to_bytes(opts["challenge"]))
+        su2 = await client.post("/api/auth/step-up", headers={"x-csrf-token": csrf},
+                                json={"password": "cu-test-password-12ch"})
+        h2 = {"x-csrf-token": csrf, "x-step-up-token": su2.json()["step_up_token"]}
+        assert (await client.post("/api/auth/passkeys/register/verify", headers=h2,
+                                  json={**cred, "label": "yubikey-5"})).status_code == 200
+        # the session alone lists them — no step-up token, no password
+        r = await client.get("/api/auth/passkeys")
+        assert r.status_code == 200, r.text
+        listed = r.json()["passkeys"]
+        assert [p["label"] for p in listed] == ["yubikey-5"]
+        assert set(listed[0]) == {"id", "label"}  # metadata only
+        # removal still demands the step-up
+        r = await client.delete(f"/api/auth/passkeys/{listed[0]['id']}",
+                                headers={"x-csrf-token": csrf})
+        assert r.status_code == 401 and r.json()["code"] == "step_up_required"
+        su3 = await client.post("/api/auth/step-up", headers={"x-csrf-token": csrf},
+                                json={"password": "cu-test-password-12ch"})
+        r = await client.delete(f"/api/auth/passkeys/{listed[0]['id']}",
+                                headers={"x-csrf-token": csrf,
+                                         "x-step-up-token": su3.json()["step_up_token"]})
+        assert r.status_code == 200
+        assert (await client.get("/api/auth/passkeys")).json()["passkeys"] == []
+
+
 async def test_passkeys_disabled_404(pg_db: str) -> None:
     import httpx
 

@@ -90,6 +90,11 @@ function Account({
   const [message, setMessage] = useState("");
   const oneTime = useOneTime();
   const [passkeys, setPasskeys] = useState<PasskeyRow[]>([]);
+  // rev 47: listing is a session-only read (metadata: id + label), so the
+  // inventory loads with the card; only removal keeps its step-up. One status
+  // word instead of two flags: a retry shows its transient state and cannot
+  // double-fire, and rows already in state survive a failed refresh.
+  const [passkeysStatus, setPasskeysStatus] = useState<"idle" | "loading" | "ready" | "failed">("idle");
   // two-phase registration (mirrors TOTP setup/confirm): each server call
   // consumes its own single-use step-up token
   const [pkCred, setPkCred] = useState<PublicKeyCredential | null>(null);
@@ -99,19 +104,46 @@ function Account({
   const [totpUri, setTotpUri] = useState("");
   const [totpCode, setTotpCode] = useState("");
 
-  // GET /api/auth/passkeys is step-up gated, so listing is an explicit action
-  // (one token) rather than a mount-time fetch that would always 401.
-  const loadPasskeys = useCallback((token: string) => {
+  const loadPasskeys = useCallback(() => {
     if (!status.passkey_configured) return;
-    void api<{ passkeys: PasskeyRow[] }>("GET", "/api/auth/passkeys", undefined, {
-      stepUpToken: token,
-    })
-      .then((data) => setPasskeys(data.passkeys))
-      .catch((err: unknown) => {
-        setError(err instanceof ApiError ? err.message : "cannot load passkeys");
+    setPasskeysStatus((prev) => (prev === "ready" ? "ready" : "loading"));
+    void api<{ passkeys: PasskeyRow[] }>("GET", "/api/auth/passkeys")
+      .then((data) => {
+        setPasskeys(data.passkeys);
+        setPasskeysStatus("ready");
+      })
+      .catch(() => {
+        // the card renders its own failure state; the shared Notice is never
+        // cleared by a later success, so it must not carry this error
+        setPasskeysStatus("failed");
       });
   }, [status.passkey_configured]);
-
+  useEffect(() => {
+    loadPasskeys();
+  }, [loadPasskeys]);
+  // the inventory's non-row state: transient (loading) and failed states are
+  // EmptyStates like the Tokens card; rows in state are rendered by the caller
+  const passkeyInventoryState = () => {
+    if (passkeysStatus === "idle" || passkeysStatus === "loading") {
+      return <EmptyState title="Loading passkeys…" />;
+    }
+    if (passkeys.length > 0) {
+      return passkeysStatus === "failed" ? (
+        <div className="row">
+          <p className="muted">Could not refresh the list — showing the passkeys loaded earlier.</p>
+          <Button label="Retry" variant="ghost" onClick={loadPasskeys} />
+        </div>
+      ) : null;
+    }
+    return passkeysStatus === "failed" ? (
+      <EmptyState
+        title="Cannot load registered passkeys"
+        action={<Button label="Retry" variant="ghost" onClick={loadPasskeys} />}
+      />
+    ) : (
+      <EmptyState mark={<IconKeys size={22} />} title="No passkeys registered" />
+    );
+  };
 
 
   const changePassword = () => {
@@ -283,7 +315,7 @@ function Account({
           <div className="card-head">
             <h2 className="card-title">Passkeys</h2>
             <p className="card-desc">
-              Register a passkey to sign in without a password; listing and removing needs a step-up.
+              Register a passkey to sign in without a password. The list loads with your session; removing one needs a step-up.
             </p>
             <div className="row">
               <Button
@@ -312,15 +344,6 @@ function Account({
                     }
                     setPkCred(credential);
                     setMessage("Confirm the registration below (needs a fresh step-up).");
-                  })
-                }
-              />
-              <Button
-                label="Show registered passkeys"
-                variant="ghost"
-                onClick={() =>
-                  setPending(() => async (token: string) => {
-                    loadPasskeys(token);
                   })
                 }
               />
@@ -378,7 +401,8 @@ function Account({
                       setPkCred(null);
                       setPkLabel("");
                       setError("");
-                      setMessage("Passkey registered. Show registered passkeys to refresh.");
+                      setMessage("Passkey registered.");
+                      loadPasskeys();
                       onStatusChanged();
                     })
                   }
@@ -386,11 +410,8 @@ function Account({
               </div>
             </div>
           ) : null}
-          {passkeys.length === 0 ? (
-            <p className="muted">
-              No passkeys loaded (listing requires a step-up).
-            </p>
-          ) : (
+          {passkeyInventoryState()}
+          {passkeys.length > 0 ? (
             <ul className="list">
               {passkeys.map((pk) => (
                 <li key={pk.id} className="row">
@@ -415,7 +436,7 @@ function Account({
                 </li>
               ))}
             </ul>
-          )}
+          ) : null}
         </div>
       ) : null}
       <div className="card">

@@ -1227,6 +1227,22 @@ await page.goto(`${BASE}/settings`);
 await until(() => page.evaluate(() =>
   [...document.querySelectorAll("button")].some((b) => /Enable TOTP/i.test(b.textContent))),
   "the account settings");
+// rev 47: the passkey inventory loads with the session alone — the card
+// settles without any step-up prompt (this stack cannot register a passkey,
+// so the settled state is the empty inventory)
+await until(() => page.evaluate(() =>
+  (document.body.textContent || "").includes("No passkeys registered")),
+  "the passkey inventory to settle");
+ok(
+  await page.evaluate(() =>
+    !document.querySelector(".scrim")
+    && ![...document.querySelectorAll("button")].some((b) => /Show registered passkeys/i.test(b.textContent))),
+  "the passkey inventory lists without a step-up prompt",
+);
+ok(
+  await page.evaluate(async () => (await fetch("/api/auth/passkeys", { credentials: "same-origin" })).status === 200),
+  "GET /api/auth/passkeys answers to the bare session",
+);
 await clickWhenReady("Enable TOTP", null, "start TOTP enrolment");
 await until(() => page.evaluate(() => !!document.querySelector(".scrim form")), "enrolment step-up");
 await fillStepUp(PW, null);
