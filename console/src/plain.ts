@@ -19,6 +19,15 @@ export function maskSecret(): string {
   return MASK;
 }
 
+/** A server ISO-8601 UTC timestamp as the console's column stamp. The API
+ *  always speaks UTC ISO-8601 (`…+00:00`), so the fixed format is
+ *  unambiguous (and one place to change if the console ever localises); a
+ *  missing value renders as an em dash rather than a blank cell. */
+export function stamp(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  return iso.slice(0, 19).replace("T", " ");
+}
+
 /** Containers that must never be rendered through an HTML sink. */
 export const PLAIN_ONLY =
   "item names, field names, field values, notes and audit detail render as text";

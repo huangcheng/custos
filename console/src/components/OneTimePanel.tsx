@@ -2,9 +2,12 @@ import { useEffect, useState } from "react";
 
 import type { OneTime } from "../onetime";
 import { Button, Notice } from "./Field";
+import { IconCheck, IconCopy, IconShield } from "./icons";
 
 // Rendered at the app level so a minted secret survives route changes. The
-// operator must dismiss it explicitly; nothing here auto-hides.
+// operator must dismiss it explicitly; nothing here auto-hides. The ink
+// banner is the family's signature for a one-time value: it outranks every
+// card on the page.
 export function OneTimePanel({
   oneTime,
   pending,
@@ -47,30 +50,53 @@ export function OneTimePanel({
   };
 
   return (
-    <div
-      className="card stack"
-      style={{ marginBottom: 18 }}
-      data-testid="one-time-panel"
-    >
-      <Notice kind="warn">
-        {titles[oneTime.kind][oneTime.retrievable ? "revealed" : "mint"]} for{" "}
-        <span className="mono">{oneTime.about}</span>{" "}
-        {oneTime.retrievable
-          ? "— copy it now; you can re-reveal it later from the inventory."
-          : "— shown once. Copy it now; it is not retrievable after you dismiss this panel."}
-      </Notice>
+    <div className="secret-banner" data-testid="one-time-panel">
+      <div className="secret-banner-head">
+        <span className="secret-icon" aria-hidden="true">
+          <IconShield size={20} />
+        </span>
+        {/* the live region is the text block only (the banner replaced a
+            Notice that announced itself): wrapping the whole banner would
+            re-announce recovery codes on every "Copied" toggle and nest the
+            error Notice's own live region inside it */}
+        <div role="status">
+          <span className="secret-kicker">
+            {oneTime.retrievable ? "Re-revealed" : "Shown once"}
+          </span>
+          <strong>{titles[oneTime.kind][oneTime.retrievable ? "revealed" : "mint"]}</strong>
+          <p>
+            For <span className="mono">{oneTime.about}</span>{" "}
+            {oneTime.retrievable
+              ? "— copy it now; you can re-reveal it later from the inventory."
+              : "— shown once. Copy it now; it is not retrievable after you dismiss this panel."}
+          </p>
+        </div>
+      </div>
       {error ? <Notice kind="error">{error}</Notice> : null}
       {values.length === 1 ? (
-        <input className="mono" readOnly value={values[0]} data-testid="one-time-value" />
+        <input
+          className="token"
+          readOnly
+          value={values[0]}
+          data-testid="one-time-value"
+          aria-label="Secret value"
+        />
       ) : (
-        <ul className="mono" style={{ columns: 2, margin: 0 }} data-testid="one-time-value">
+        <ul className="secret-codes" data-testid="one-time-value">
           {values.map((value) => (
             <li key={value}>{value}</li>
           ))}
         </ul>
       )}
-      <div className="row">
-        <Button label={copied ? "Copied" : "Copy"} variant="primary" onClick={copy} />
+      <div className="secret-actions">
+        <Button
+          label={copied ? "Copied" : "Copy"}
+          variant="primary"
+          onClick={copy}
+          title="Copy to the clipboard"
+        >
+          {copied ? <IconCheck size={16} /> : <IconCopy size={16} />}
+        </Button>
         <Button
           label={pending > 1 ? `I have stored it (${pending - 1} more)` : "I have stored it"}
           variant="ghost"

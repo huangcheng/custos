@@ -7,6 +7,8 @@ import { Keys } from "./screens/Keys";
 import { Login } from "./screens/Login";
 import { Settings } from "./screens/Settings";
 import { OneTimePanel } from "./components/OneTimePanel";
+import { Button } from "./components/Field";
+import { IconItems, IconKeys, IconAudit, IconSettings, IconLogout } from "./components/icons";
 import { clearOneTimeForSignOut, useOneTime } from "./onetime";
 import type { AuthStatus } from "./types";
 
@@ -17,10 +19,10 @@ type Boot =
   | { phase: "error"; message: string };
 
 const NAV = [
-  { href: "/items", label: "Items" },
-  { href: "/keys", label: "Keys" },
-  { href: "/audit", label: "Audit" },
-  { href: "/settings", label: "Settings" },
+  { href: "/items", label: "Items", icon: IconItems },
+  { href: "/keys", label: "Keys", icon: IconKeys },
+  { href: "/audit", label: "Audit", icon: IconAudit },
+  { href: "/settings", label: "Settings", icon: IconSettings },
 ];
 
 export function App() {
@@ -127,17 +129,19 @@ export function App() {
   }, [go]);
 
   if (boot.phase === "loading") {
-    return <div className="empty">Loading…</div>;
+    return <div className="boot">Loading…</div>;
   }
   if (boot.phase === "error") {
     return (
       <div className="auth-form-wrap">
-        <div className="auth-form card">
-          <h1 className="page-title">Cannot reach Custos</h1>
-          <p className="page-sub">{boot.message}</p>
-          <button type="button" onClick={() => void bootstrap()}>
-            Retry
-          </button>
+        <div className="auth-form card stack">
+          <div>
+            <h1 className="auth-title">Cannot reach Custos</h1>
+            <p className="auth-lede">{boot.message}</p>
+          </div>
+          <div className="row">
+            <Button label="Retry" variant="primary" onClick={() => void bootstrap()} />
+          </div>
         </div>
       </div>
     );
@@ -209,7 +213,10 @@ export function App() {
           <span className="brand-mark" aria-hidden="true">
             C
           </span>
-          <span>Custos</span>
+          <span className="brand-text">
+            <span className="brand-name">Custos</span>
+            <span className="brand-sub">Credential vault</span>
+          </span>
         </div>
         <nav className="nav" aria-label="Sections">
           {NAV.map((entry) => (
@@ -227,12 +234,14 @@ export function App() {
                 go(entry.href);
               }}
             >
-              {entry.label}
+              <entry.icon />
+              <span>{entry.label}</span>
             </a>
           ))}
         </nav>
         <div className="sidebar-foot">
-          <button type="button" className="ghost" onClick={() => void signOut()}>
+          <button type="button" className="nav-signout" onClick={() => void signOut()}>
+            <IconLogout />
             Log out
           </button>
         </div>
@@ -248,7 +257,7 @@ export function App() {
             onDismiss={oneTime.dismiss}
           />
         ) : null}
-        {renderRoute(boot.status)}
+        <div className="stack">{renderRoute(boot.status)}</div>
       </main>
     </div>
   );

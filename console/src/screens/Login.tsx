@@ -204,27 +204,31 @@ export function Login({ status, onAuthenticated }: Props) {
           <span className="brand-mark" aria-hidden="true">
             C
           </span>
-          <span>Custos</span>
+          <span className="brand-text">
+            <span className="brand-name">Custos</span>
+          </span>
         </div>
-        <div>
+        <div className="auth-copy">
+          <p className="auth-eyebrow">Operator console</p>
           <h1>Credentials your agents can actually reach.</h1>
           <p>
             Named multi-field items, encrypted at rest, scoped to the keys you
             issue. Sign in to manage what agents may read.
           </p>
         </div>
+        <p className="auth-foot">AES-256-GCM at rest · scoped agent keys · audit log</p>
       </div>
       <div className="auth-form-wrap">
         <form
-          className="auth-form stack"
+          className="auth-form"
           onSubmit={(event) => {
             event.preventDefault();
             void submit();
           }}
         >
           <div>
-            <h2 className="page-title">{title}</h2>
-            <p className="page-sub">{subtitle}</p>
+            <h2 className="auth-title">{title}</h2>
+            <p className="auth-lede">{subtitle}</p>
           </div>
           {error ? <Notice kind="error">{error}</Notice> : null}
           {setupDone ? (
@@ -236,6 +240,7 @@ export function Login({ status, onAuthenticated }: Props) {
             <Fragment key="code">
               <TextField
                 label={useRecovery ? "Recovery code" : "Authenticator code"}
+                name="otp"
                 value={second}
                 onChange={setSecond}
                 inputMode={useRecovery ? "text" : "numeric"}
@@ -279,6 +284,7 @@ export function Login({ status, onAuthenticated }: Props) {
             <Fragment key="credentials">
               <TextField
                 label="Username"
+                name="username"
                 value={username}
                 onChange={setUsername}
                 autoComplete="username"
@@ -286,6 +292,7 @@ export function Login({ status, onAuthenticated }: Props) {
               />
               <TextField
                 label="Password"
+                name="password"
                 value={password}
                 onChange={setPassword}
                 type="password"
@@ -295,6 +302,7 @@ export function Login({ status, onAuthenticated }: Props) {
               {setup ? (
                 <TextField
                   label="Setup code"
+                  name="setup-code"
                   value={setupCode}
                   onChange={setSetupCode}
                   autoComplete="off"
@@ -304,6 +312,7 @@ export function Login({ status, onAuthenticated }: Props) {
               {!setup && !status.totp_required && useRecovery ? (
                 <TextField
                   label="Recovery code"
+                  name="recovery-code"
                   value={second}
                   onChange={setSecond}
                   inputMode="text"

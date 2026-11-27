@@ -4,6 +4,9 @@ import { revealCredential, showCredential } from "../onetime";
 import { Button, Notice, TextField } from "../components/Field";
 import { ConfirmStepUp } from "../components/ConfirmStepUp";
 import { Drawer } from "../components/Drawer";
+import { EmptyState } from "../components/EmptyState";
+import { PageHeader } from "../components/PageHeader";
+import { IconKeys } from "../components/icons";
 import {
   KeyFormError,
   credentialAbout,
@@ -20,6 +23,10 @@ const BLANK: KeyForm = { label: "", expiresAt: "" };
 export function Keys({ onSignOut }: { onSignOut: () => void }) {
   const [rows, setRows] = useState<KeyRow[]>([]);
   const [form, setForm] = useState<KeyForm>(BLANK);
+  // an empty inventory and a not-yet-loaded one must not look the same, and a
+  // failed fetch must not read as an empty vault under the error notice
+  const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
 
   const [error, setError] = useState("");
   // mint-form errors live only inside the drawer; page-level `error` stays
@@ -38,13 +45,17 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
   const load = useCallback(async () => {
     try {
       const data = await api<{ keys: KeyRow[] }>("GET", "/api/admin/keys");
+      setLoadFailed(false);
       setRows(data.keys);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         onSignOut();
         return;
       }
+      setLoadFailed(true);
       setError(err instanceof ApiError ? err.message : "cannot load keys");
+    } finally {
+      setLoading(false);
     }
   }, [onSignOut]);
 
@@ -99,6 +110,18 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
     setMinting(false);
   };
 
+  // one open sequence for the header action and the empty-state action, with
+  // one guard, so the reset list cannot drift between the two entry points
+  const mintDisabled = mintBusy || minting || pending !== null;
+  const openMint = () => {
+    if (mintDisabled) return;
+    setForm(BLANK);
+    setMintError("");
+    setError("");
+    drawerOpen.current = true;
+    setMinting(true);
+  };
+
   const revoke = (keyId: string) => {
     setConfirm({
       title: "Delete key",
@@ -126,30 +149,84 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
     }
   };
 
+  // loading, empty and populated are three distinct states: an inventory
+  // that has not loaded yet must never read as an empty vault
+  const inventory = () => {
+    if (loading) return <EmptyState title="Loading keys…" />;
+    if (loadFailed) return <EmptyState title="Cannot load keys" />;
+    if (rows.length === 0) {
+      return (
+        <EmptyState
+          mark={<IconKeys size={22} />}
+          title="No keys yet"
+          action={<Button label="Mint key" variant="primary" onClick={openMint} />}
+        >
+          Mint a key to let an agent read the vault.
+        </EmptyState>
+      );
+    }
+    return (
+      <table>
+        <thead>
+          <tr>
+            <th>Label</th>
+            <th>Key ID</th>
+            <th>Expires</th>
+            <th className="actions-cell" aria-label="Actions" />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => {
+            const blocker = revealBlocker(row);
+            return (
+              <tr key={row.key_id}>
+                <td data-label="Label">
+                  <span className="cell-main" title={row.label}>
+                    {truncate(row.label, 28)}
+                  </span>
+                </td>
+                <td data-label="Key ID">
+                  <span className="mono">{row.key_id}</span>
+                </td>
+                <td data-label="Expires">
+                  <span className="mono muted" title={row.expires_at ?? undefined}>
+                    {expiryLabel(row)}
+                  </span>
+                </td>
+                <td className="actions-cell" data-label="">
+                  <span className="actions">
+                    {/* the span carries the tooltip: disabled buttons get no pointer events */}
+                    <span title={blocker}>
+                      <Button
+                        label="Reveal"
+                        onClick={() => void reveal(row)}
+                        disabled={busy || blocker !== undefined}
+                      />
+                    </span>
+                    <Button
+                      label="Delete"
+                      variant="danger"
+                      onClick={() => revoke(row.key_id)}
+                      disabled={busy}
+                    />
+                  </span>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    );
+  };
+
   return (
     <>
-      <div className="row">
-        <div>
-          <h1 className="page-title">Keys</h1>
-          <p className="page-sub">
-            Agent credentials. The full token is shown at mint and can be re-revealed from the
-            inventory.
-          </p>
-        </div>
-        <span className="row-end" />
-        <Button
-          label="Mint key"
-          variant="primary"
-          disabled={mintBusy || minting || pending !== null}
-          onClick={() => {
-            setForm(BLANK);
-            setMintError("");
-            setError("");
-            drawerOpen.current = true;
-            setMinting(true);
-          }}
-        />
-      </div>
+      <PageHeader
+        kicker="Agent access"
+        title="Keys"
+        lede="Agent credentials. The full token is shown at mint and can be re-revealed from the inventory."
+        actions={<Button label="Mint key" variant="primary" disabled={mintDisabled} onClick={openMint} />}
+      />
       {error ? <Notice kind="error">{error}</Notice> : null}
       {minting ? (
         <Drawer
@@ -180,59 +257,14 @@ export function Keys({ onSignOut }: { onSignOut: () => void }) {
               hint="ISO 8601 or a date input; blank means no expiry"
               disabled={mintBusy}
             />
-            <div className="row">
-              <Button label="Mint key" variant="primary" type="submit" disabled={mintBusy} />
+            <div className="form-actions">
               <Button label="Cancel" variant="ghost" onClick={closeMint} />
+              <Button label="Mint key" variant="primary" type="submit" disabled={mintBusy} />
             </div>
           </form>
         </Drawer>
       ) : null}
-      <div className="card" style={{ padding: 0, marginTop: 16 }}>
-        {rows.length === 0 ? (
-          <div className="empty">No keys yet.</div>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Label</th>
-                <th>Key ID</th>
-                <th>Expires</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => {
-                const blocker = revealBlocker(row);
-                return (
-                <tr key={row.key_id}>
-                  <td title={row.label}>{truncate(row.label, 28)}</td>
-                  <td className="mono">{row.key_id}</td>
-                  <td className="mono muted" title={row.expires_at ?? undefined}>
-                    {expiryLabel(row)}
-                  </td>
-                  <td>
-                    {/* the span carries the tooltip: disabled buttons get no pointer events */}
-                    <span title={blocker}>
-                      <Button
-                        label="Reveal"
-                        onClick={() => void reveal(row)}
-                        disabled={busy || blocker !== undefined}
-                      />
-                    </span>{" "}
-                    <Button
-                      label="Delete"
-                      variant="danger"
-                      onClick={() => revoke(row.key_id)}
-                      disabled={busy}
-                    />
-                  </td>
-                </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-      </div>
+      <div className="card flush">{inventory()}</div>
       {pending ? (
         <ConfirmStepUp
           totpRequired={totpRequired}

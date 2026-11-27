@@ -3,6 +3,9 @@ import { ApiError, api } from "../api";
 import { revealCredential, showCredential, useOneTime } from "../onetime";
 import { Button, Notice, TextField } from "../components/Field";
 import { ConfirmStepUp } from "../components/ConfirmStepUp";
+import { EmptyState } from "../components/EmptyState";
+import { PageHeader } from "../components/PageHeader";
+import { IconKeys } from "../components/icons";
 import {
   KeyFormError,
   credentialAbout,
@@ -25,6 +28,12 @@ import type {
 
 type Tab = "account" | "tokens" | "maintenance";
 
+const TABS: { id: Tab; label: string }[] = [
+  { id: "account", label: "Account" },
+  { id: "tokens", label: "Operator tokens" },
+  { id: "maintenance", label: "Maintenance" },
+];
+
 export function Settings({
   status,
   onSignOut,
@@ -39,24 +48,17 @@ export function Settings({
   const [tab, setTab] = useState<Tab>("account");
   return (
     <>
-      <h1 className="page-title">Settings</h1>
-      <p className="page-sub">Account security, operator tokens, and maintenance.</p>
-      <div className="row" style={{ marginBottom: 16 }}>
-        <Button
-          label="Account"
-          variant={tab === "account" ? "primary" : "ghost"}
-          onClick={() => setTab("account")}
-        />
-        <Button
-          label="Operator tokens"
-          variant={tab === "tokens" ? "primary" : "ghost"}
-          onClick={() => setTab("tokens")}
-        />
-        <Button
-          label="Maintenance"
-          variant={tab === "maintenance" ? "primary" : "ghost"}
-          onClick={() => setTab("maintenance")}
-        />
+      <PageHeader
+        kicker="Operator"
+        title="Settings"
+        lede="Account security, operator tokens, and maintenance."
+      />
+      <div className="segment" role="group" aria-label="Settings section">
+        {TABS.map(({ id, label }) => (
+          <button key={id} type="button" aria-pressed={tab === id} onClick={() => setTab(id)}>
+            {label}
+          </button>
+        ))}
       </div>
       {tab === "account" ? (
         <Account
@@ -143,25 +145,27 @@ function Account({
       {error ? <Notice kind="error">{error}</Notice> : null}
       {message ? <Notice kind="ok">{message}</Notice> : null}
       <div className="card stack">
-        <h2 className="page-sub" style={{ margin: 0 }}>
-          Password
-        </h2>
-        <TextField
-          label="Current password"
-          value={current}
-          onChange={setCurrent}
-          type="password"
-          autoComplete="current-password"
-        />
-        <TextField
-          label="New password"
-          value={next}
-          onChange={setNext}
-          type="password"
-          autoComplete="new-password"
-          hint="At least 12 characters."
-        />
-        <div className="row">
+        <h2 className="card-title">Password</h2>
+        <div className="form-grid cols-2">
+          <TextField
+            label="Current password"
+            name="current-password"
+            value={current}
+            onChange={setCurrent}
+            type="password"
+            autoComplete="current-password"
+          />
+          <TextField
+            label="New password"
+            name="new-password"
+            value={next}
+            onChange={setNext}
+            type="password"
+            autoComplete="new-password"
+            hint="At least 12 characters."
+          />
+        </div>
+        <div className="form-actions">
           <Button
             label="Change password"
             variant="primary"
@@ -171,161 +175,176 @@ function Account({
         </div>
       </div>
       <div className="card stack">
-        <h2 className="page-sub" style={{ margin: 0 }}>
-          Authenticator
-        </h2>
-        <p className="muted" style={{ margin: 0 }}>
-          {status.totp_required
-            ? "TOTP is enabled. Disabling it requires a step-up."
-            : "TOTP is not enabled — step-up is password-only until you enable it."}
-        </p>
-        <div className="row">
-          <Button
-            label={status.totp_required ? "Disable TOTP" : "Enable TOTP"}
-            onClick={() =>
-              setPending(() => async (token: string) => {
-                if (status.totp_required) {
-                  await api("POST", "/api/auth/totp/disable", undefined, { stepUpToken: token });
-                  setMessage("TOTP disabled.");
-                  onStatusChanged();
-                  return;
-                }
-                const started = await api<{ provisioning_uri: string; secret: string }>(
-                  "POST",
-                  "/api/auth/totp/setup",
-                  undefined,
-                  { stepUpToken: token },
-                );
-                oneTime.show({
-                  kind: "totp-secret",
-                  value: started.secret,
-                  about: "Custos TOTP",
-                });
-                setTotpSecret(started.secret);
-                setTotpUri(started.provisioning_uri);
-                setMessage("Scan the QR with your authenticator, then confirm below.");
-              })
-            }
-          />
-          <Button
-            label="Regenerate recovery codes"
-            variant="ghost"
-            onClick={() =>
-              setPending(() => async (token: string) => {
-                const data = await api<{ recovery_codes: string[] }>(
-                  "POST",
-                  "/api/auth/recovery/regen",
-                  undefined,
-                  { stepUpToken: token },
-                );
-                oneTime.show({
-                  kind: "recovery-codes",
-                  value: data.recovery_codes,
-                  about: "regenerated",
-                });
-              })
-            }
-          />
+        <div className="card-head">
+          <h2 className="card-title">Authenticator</h2>
+          <p className="card-desc">
+            {status.totp_required
+              ? "TOTP is enabled. Disabling it requires a step-up."
+              : "TOTP is not enabled — step-up is password-only until you enable it."}
+          </p>
+          <div className="row">
+            <Button
+              label={status.totp_required ? "Disable TOTP" : "Enable TOTP"}
+              onClick={() =>
+                setPending(() => async (token: string) => {
+                  if (status.totp_required) {
+                    await api("POST", "/api/auth/totp/disable", undefined, { stepUpToken: token });
+                    setMessage("TOTP disabled.");
+                    onStatusChanged();
+                    return;
+                  }
+                  const started = await api<{ provisioning_uri: string; secret: string }>(
+                    "POST",
+                    "/api/auth/totp/setup",
+                    undefined,
+                    { stepUpToken: token },
+                  );
+                  oneTime.show({
+                    kind: "totp-secret",
+                    value: started.secret,
+                    about: "Custos TOTP",
+                  });
+                  setTotpSecret(started.secret);
+                  setTotpUri(started.provisioning_uri);
+                  setMessage("Scan the QR with your authenticator, then confirm below.");
+                })
+              }
+            />
+            <Button
+              label="Regenerate recovery codes"
+              variant="ghost"
+              onClick={() =>
+                setPending(() => async (token: string) => {
+                  const data = await api<{ recovery_codes: string[] }>(
+                    "POST",
+                    "/api/auth/recovery/regen",
+                    undefined,
+                    { stepUpToken: token },
+                  );
+                  oneTime.show({
+                    kind: "recovery-codes",
+                    value: data.recovery_codes,
+                    about: "regenerated",
+                  });
+                })
+              }
+            />
+          </div>
         </div>
         {totpSecret ? (
-          <div className="card stack">
+          <div className="panel enrol">
             {totpUri ? <QrCode value={totpUri} /> : null}
-            <p className="muted" style={{ margin: 0 }}>
-              Can&apos;t scan? Enter this key manually:
-            </p>
-            <p className="mono" style={{ margin: 0, wordBreak: "break-all" }}>
-              {totpSecret}
-            </p>
-            <TextField
-              label="First code from your authenticator"
-              value={totpCode}
-              onChange={setTotpCode}
-              inputMode="numeric"
-              autoComplete="one-time-code"
-            />
-            <div className="row">
-              <Button
-                label="Confirm and enable"
-                variant="primary"
-                disabled={totpCode.trim().length === 0}
-                onClick={() =>
-                  setPending(() => async (token: string) => {
-                    const data = await api<{ recovery_codes: string[] }>(
-                      "POST",
-                      "/api/auth/totp/confirm",
-                      { code: totpCode.trim() },
-                      { stepUpToken: token },
-                    );
-                    oneTime.show({
-                      kind: "recovery-codes",
-                      value: data.recovery_codes,
-                      about: "TOTP enable",
-                    });
-                    setTotpSecret("");
-                  setTotpUri("");
-                    setTotpCode("");
-                    setMessage("TOTP enabled.");
-                    onStatusChanged();
-                  })
-                }
+            <div className="stack">
+              <p className="muted">
+                Can’t scan? Enter this key manually:
+              </p>
+              <code className="secret-value">{totpSecret}</code>
+              <TextField
+                label="First code from your authenticator"
+                name="totp-code"
+                value={totpCode}
+                onChange={setTotpCode}
+                inputMode="numeric"
+                autoComplete="one-time-code"
               />
+              <div className="form-actions">
+                <Button
+                  label="Confirm and enable"
+                  variant="primary"
+                  disabled={totpCode.trim().length === 0}
+                  onClick={() =>
+                    setPending(() => async (token: string) => {
+                      const data = await api<{ recovery_codes: string[] }>(
+                        "POST",
+                        "/api/auth/totp/confirm",
+                        { code: totpCode.trim() },
+                        { stepUpToken: token },
+                      );
+                      oneTime.show({
+                        kind: "recovery-codes",
+                        value: data.recovery_codes,
+                        about: "TOTP enable",
+                      });
+                      setTotpSecret("");
+                      setTotpUri("");
+                      setTotpCode("");
+                      setMessage("TOTP enabled.");
+                      onStatusChanged();
+                    })
+                  }
+                />
+              </div>
             </div>
           </div>
         ) : null}
       </div>
       {status.passkey_configured ? (
         <div className="card stack">
-          <h2 className="page-sub" style={{ margin: 0 }}>
-            Passkeys
-          </h2>
-          <div className="row">
-            <Button
-              label="Register a passkey"
-              onClick={() =>
-                setPending(() => async (token: string) => {
-                  setError("");
-                  setMessage("");
-                  const options = await api<PublicKeyCredentialCreationOptionsJSON>(
-                    "POST", "/api/auth/passkeys/register/options", {},
-                    { stepUpToken: token },
-                  );
-                  let credential: PublicKeyCredential | null = null;
-                  try {
-                    credential = (await navigator.credentials.create({
-                      publicKey: decodeCreateOptions(options),
-                    })) as PublicKeyCredential | null;
-                  } catch (err) {
-                    const name = err instanceof Error ? err.name : "error";
-                    setError(`Passkey registration failed (${name}). Try again.`);
-                    return;
-                  }
-                  if (!credential) {
-                    setError("Passkey registration was cancelled.");
-                    return;
-                  }
-                  setPkCred(credential);
-                  setMessage("Confirm the registration below (needs a fresh step-up).");
-                })
-              }
-            />
-            <Button
-              label="Show registered passkeys"
-              onClick={() =>
-                setPending(() => async (token: string) => {
-                  loadPasskeys(token);
-                })
-              }
-            />
+          <div className="card-head">
+            <h2 className="card-title">Passkeys</h2>
+            <p className="card-desc">
+              Register a passkey to sign in without a password; listing and removing needs a step-up.
+            </p>
+            <div className="row">
+              <Button
+                label="Register a passkey"
+                onClick={() =>
+                  setPending(() => async (token: string) => {
+                    setError("");
+                    setMessage("");
+                    const options = await api<PublicKeyCredentialCreationOptionsJSON>(
+                      "POST", "/api/auth/passkeys/register/options", {},
+                      { stepUpToken: token },
+                    );
+                    let credential: PublicKeyCredential | null = null;
+                    try {
+                      credential = (await navigator.credentials.create({
+                        publicKey: decodeCreateOptions(options),
+                      })) as PublicKeyCredential | null;
+                    } catch (err) {
+                      const name = err instanceof Error ? err.name : "error";
+                      setError(`Passkey registration failed (${name}). Try again.`);
+                      return;
+                    }
+                    if (!credential) {
+                      setError("Passkey registration was cancelled.");
+                      return;
+                    }
+                    setPkCred(credential);
+                    setMessage("Confirm the registration below (needs a fresh step-up).");
+                  })
+                }
+              />
+              <Button
+                label="Show registered passkeys"
+                variant="ghost"
+                onClick={() =>
+                  setPending(() => async (token: string) => {
+                    loadPasskeys(token);
+                  })
+                }
+              />
+            </div>
           </div>
           {pkCred ? (
-            <div className="stack">
+            <div className="panel stack">
               <TextField
                 label="Passkey label"
+                name="passkey-label"
                 value={pkLabel}
                 onChange={setPkLabel}
                 hint="Shown in the list so you can tell passkeys apart."
               />
-              <div className="row">
+              <div className="form-actions">
+                <Button
+                  label="Cancel"
+                  variant="ghost"
+                  onClick={() => {
+                    setPkCred(null);
+                    setPkLabel("");
+                    setMessage("");
+                  }}
+                />
                 <Button
                   label="Confirm registration"
                   variant="primary"
@@ -364,27 +383,20 @@ function Account({
                     })
                   }
                 />
-                <Button
-                  label="Cancel"
-                  variant="ghost"
-                  onClick={() => {
-                    setPkCred(null);
-                    setPkLabel("");
-                    setMessage("");
-                  }}
-                />
               </div>
             </div>
           ) : null}
           {passkeys.length === 0 ? (
-            <p className="muted" style={{ margin: 0 }}>
+            <p className="muted">
               No passkeys loaded (listing requires a step-up).
             </p>
           ) : (
-            <ul className="stack" style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            <ul className="list">
               {passkeys.map((pk) => (
                 <li key={pk.id} className="row">
-                  <span className="mono">{truncate(pk.label, 32)}</span>
+                  <span className="mono cell-main" title={pk.label}>
+                    {truncate(pk.label, 32)}
+                  </span>
                   <span className="row-end" />
                   <Button
                     label="Remove"
@@ -406,12 +418,13 @@ function Account({
           )}
         </div>
       ) : null}
-      <div className="card stack">
-        <h2 className="page-sub" style={{ margin: 0 }}>
-          Session
-        </h2>
-        <div className="row">
-          <Button label="Log out" variant="danger" onClick={onSignOut} />
+      <div className="card">
+        <div className="card-head">
+          <h2 className="card-title">Session</h2>
+          <p className="card-desc">Signing out ends the session in this browser.</p>
+          <div className="row">
+            <Button label="Log out" variant="danger" onClick={onSignOut} />
+          </div>
         </div>
       </div>
       {pending ? (
@@ -435,6 +448,10 @@ function Account({
 
 function Tokens({ totpRequired }: { totpRequired: boolean }) {
   const [rows, setRows] = useState<TokenRow[]>([]);
+  // an empty inventory and a not-yet-loaded one must not look the same, and a
+  // failed fetch must not read as an empty one
+  const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [label, setLabel] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
   const [allowSensitive, setAllowSensitive] = useState(false);
@@ -448,9 +465,13 @@ function Tokens({ totpRequired }: { totpRequired: boolean }) {
   const load = useCallback(async () => {
     try {
       const data = await api<{ tokens: TokenRow[] }>("GET", "/api/admin/tokens");
+      setLoadFailed(false);
       setRows(data.tokens);
     } catch (err) {
+      setLoadFailed(true);
       setError(err instanceof ApiError ? err.message : "cannot load tokens");
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -495,6 +516,13 @@ function Tokens({ totpRequired }: { totpRequired: boolean }) {
     }
   };
 
+  // an inventory that has not loaded yet must never read as empty
+  const emptyInventory = () => {
+    if (loading) return <EmptyState title="Loading tokens…" />;
+    if (loadFailed) return <EmptyState title="Cannot load operator tokens" />;
+    return <EmptyState mark={<IconKeys size={22} />} title="No operator tokens" />;
+  };
+
   return (
     <div className="stack">
       {error ? <Notice kind="error">{error}</Notice> : null}
@@ -502,28 +530,27 @@ function Tokens({ totpRequired }: { totpRequired: boolean }) {
           and nothing typed behind the request should be silently dropped */}
       <fieldset className="stack" disabled={minting}>
         <div className="card stack">
-          <h2 className="page-sub" style={{ margin: 0 }}>
-            Mint an operator token
-          </h2>
-          <div className="row">
-            <TextField label="Label" value={label} onChange={setLabel} />
+          <h2 className="card-title">Mint an operator token</h2>
+          <div className="form-grid cols-2">
+            <TextField label="Label" name="token-label" value={label} onChange={setLabel} />
             <TextField
               label="Expires"
+              name="token-expires"
               value={expiresAt}
               onChange={setExpiresAt}
               hint="Required. Max 30 days when sensitive."
             />
-            <label className="row" style={{ alignItems: "center", gap: 8 }}>
-              <input
-                type="checkbox"
-                checked={allowSensitive}
-                onChange={(event) => setAllowSensitive(event.target.checked)}
-                style={{ width: 18, minHeight: 18 }}
-              />
-              <span>allow sensitive operations</span>
-            </label>
           </div>
-          <div className="row">
+          <label className="check">
+            <input
+              type="checkbox"
+              name="token-sensitive"
+              checked={allowSensitive}
+              onChange={(event) => setAllowSensitive(event.target.checked)}
+            />
+            <span>allow sensitive operations</span>
+          </label>
+          <div className="form-actions">
             <Button
               label="Mint token"
               variant="primary"
@@ -533,9 +560,9 @@ function Tokens({ totpRequired }: { totpRequired: boolean }) {
           </div>
         </div>
       </fieldset>
-      <div className="card" style={{ padding: 0 }}>
+      <div className="card flush">
         {rows.length === 0 ? (
-          <div className="empty">No operator tokens.</div>
+          emptyInventory()
         ) : (
           <table>
             <thead>
@@ -544,52 +571,62 @@ function Tokens({ totpRequired }: { totpRequired: boolean }) {
                 <th>Key ID</th>
                 <th>Sensitive</th>
                 <th>Expires</th>
-                <th />
+                <th className="actions-cell" aria-label="Actions" />
               </tr>
             </thead>
             <tbody>
               {rows.map((row) => {
                 const blocker = revealBlocker(row);
                 return (
-                <tr key={row.key_id}>
-                  <td title={row.label}>{truncate(row.label, 28)}</td>
-                  <td className="mono">{row.key_id}</td>
-                  <td>
-                    <span className={`pill ${row.allow_sensitive ? "accent" : ""}`}>
-                      {row.allow_sensitive ? "yes" : "no"}
-                    </span>
-                  </td>
-                  <td className="mono muted" title={row.expires_at}>
-                    {expiryLabel(row)}
-                  </td>
-                  <td>
-                    {row.revoked_at ? null : (
-                      <>
-                        {/* the span carries the tooltip: disabled buttons get no pointer events */}
-                        <span title={blocker}>
+                  <tr key={row.key_id}>
+                    <td data-label="Label">
+                      <span className="cell-main" title={row.label}>
+                        {truncate(row.label, 28)}
+                      </span>
+                    </td>
+                    <td data-label="Key ID">
+                      <span className="mono">{row.key_id}</span>
+                    </td>
+                    <td data-label="Sensitive">
+                      <span className={`pill ${row.allow_sensitive ? "accent" : ""}`}>
+                        {row.allow_sensitive ? "yes" : "no"}
+                      </span>
+                    </td>
+                    <td data-label="Expires">
+                      <span className="mono muted" title={row.expires_at}>
+                        {expiryLabel(row)}
+                      </span>
+                    </td>
+                    <td className="actions-cell" data-label="">
+                      {row.revoked_at ? (
+                        <span className="pill">revoked</span>
+                      ) : (
+                        <span className="actions">
+                          {/* the span carries the tooltip: disabled buttons get no pointer events */}
+                          <span title={blocker}>
+                            <Button
+                              label="Reveal"
+                              disabled={busy || blocker !== undefined}
+                              onClick={() => void reveal(row)}
+                            />
+                          </span>
                           <Button
-                            label="Reveal"
-                            disabled={busy || blocker !== undefined}
-                            onClick={() => void reveal(row)}
+                            label="Revoke"
+                            variant="danger"
+                            disabled={busy}
+                            onClick={() =>
+                              setPending(() => async (token: string) => {
+                                await api("DELETE", `/api/admin/tokens/${row.key_id}`, undefined, {
+                                  stepUpToken: token,
+                                });
+                                await load();
+                              })
+                            }
                           />
-                        </span>{" "}
-                        <Button
-                          label="Revoke"
-                          variant="danger"
-                          disabled={busy}
-                          onClick={() =>
-                            setPending(() => async (token: string) => {
-                              await api("DELETE", `/api/admin/tokens/${row.key_id}`, undefined, {
-                                stepUpToken: token,
-                              });
-                              await load();
-                            })
-                          }
-                        />
-                      </>
-                    )}
-                  </td>
-                </tr>
+                        </span>
+                      )}
+                    </td>
+                  </tr>
                 );
               })}
             </tbody>
@@ -676,64 +713,30 @@ function Maintenance({ totpRequired }: { totpRequired: boolean }) {
     });
   };
 
+  const olderRows = audit
+    ? Object.values(audit.affected).reduce((total, names) => total + names.length, 0)
+    : 0;
+  // one sum feeds both the verdict and the sentence, so they cannot disagree
+  const unreadableTotal = verify
+    ? verify.unreadable.fields +
+      verify.unreadable.history +
+      verify.unreadable.operator +
+      verify.unreadable.agent_keys +
+      verify.unreadable.operator_tokens
+    : 0;
+
   return (
     <div className="stack">
       {error ? <Notice kind="error">{error}</Notice> : null}
       <div className="card stack">
-        <h2 className="page-sub" style={{ margin: 0 }}>
-          Key versions
-        </h2>
-        {audit ? (
-          <>
-            <p className="muted" style={{ margin: 0 }}>
-              Newest version: <span className="mono">k{audit.newest}</span>
-            </p>
-            <table>
-              <thead>
-                <tr>
-                  <th>Domain</th>
-                  <th>Rows per version</th>
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(audit.versions).map(([domain, versions]) => (
-                  <tr key={domain}>
-                    <td className="mono">{domain}</td>
-                    <td className="mono">
-                      {Object.keys(versions).length === 0
-                        ? "—"
-                        : Object.entries(versions)
-                            .map(([version, count]) => `k${version}: ${count}`)
-                            .join(" · ")}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {Object.keys(audit.affected).length > 0 ? (
-              <div className="stack">
-                <span className="muted">Items still under an older version</span>
-                {Object.entries(audit.affected).map(([version, names]) => (
-                  <p key={version} className="mono" style={{ margin: 0 }}>
-                    k{version}: {names.slice(0, 8).join(", ")}
-                    {names.length > 8 ? ` +${names.length - 8} more` : ""}
-                  </p>
-                ))}
-              </div>
-            ) : (
-              <p className="muted" style={{ margin: 0 }}>
-                Every row is under the newest version.
-              </p>
-            )}
-          </>
-        ) : (
-          <p className="muted">Loading…</p>
-        )}
-        <div className="row">
-          <Button label="Run rekey" variant="primary" onClick={runRekey} />
-          <Button
-            label="Verify all rows"
-            onClick={() =>
+        <div className="card-head">
+          <h2 className="card-title">Key versions</h2>
+          <p className="card-desc">
+            Every encrypted row carries the keyring version it was sealed with. A rekey moves
+            older rows to the newest version and reports the rows it could not read.
+          </p>
+          <div className="row">
+            <Button label="Verify all rows" onClick={() =>
               setPending(() => async (token: string) => {
                 // verify is a paged sweep: one call checks only `limit` rows
                 let runToken: string | undefined = token;
@@ -769,64 +772,142 @@ function Maintenance({ totpRequired }: { totpRequired: boolean }) {
                   cursor = data.cursor;
                 }
               })
-            }
-          />
+            } />
+            <Button label="Run rekey" variant="primary" onClick={runRekey} />
+          </div>
         </div>
+        {audit ? (
+          <>
+            <dl className="stats">
+              <div className="stat">
+                <dt>Newest version</dt>
+                <dd>k{audit.newest}</dd>
+              </div>
+              <div className="stat">
+                <dt>Domains</dt>
+                <dd>{Object.keys(audit.versions).length}</dd>
+              </div>
+              <div className="stat">
+                <dt>Items on an older version</dt>
+                <dd>{olderRows}</dd>
+              </div>
+            </dl>
+            <div className="table-inset">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Domain</th>
+                    <th>Rows per version</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(audit.versions).map(([domain, versions]) => (
+                    <tr key={domain}>
+                      <td data-label="Domain">
+                        <span className="mono">{domain}</span>
+                      </td>
+                      <td data-label="Rows per version">
+                        <span className="mono">
+                          {Object.keys(versions).length === 0
+                            ? "—"
+                            : Object.entries(versions)
+                                .map(([version, count]) => `k${version}: ${count}`)
+                                .join(" · ")}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {olderRows > 0 ? (
+              <div className="panel stack">
+                <span className="group-label">Items still under an older version</span>
+                {Object.entries(audit.affected).map(([version, names]) => (
+                  <p key={version} className="mono">
+                    k{version}: {names.slice(0, 8).join(", ")}
+                    {names.length > 8 ? ` +${names.length - 8} more` : ""}
+                  </p>
+                ))}
+              </div>
+            ) : (
+              <p className="muted">
+                Every row is under the newest version.
+              </p>
+            )}
+          </>
+        ) : (
+          <EmptyState title={error ? "Cannot load key versions" : "Loading key versions…"} />
+        )}
         {rekey ? (
           <Notice kind={rekey.skipped > 0 ? "warn" : "ok"}>
             Rekey finished: {rekey.skipped} skipped (unreadable) rows.
           </Notice>
         ) : null}
         {verify ? (
-          <Notice
-            kind={
-              verify.unreadable.fields +
-                verify.unreadable.history +
-                verify.unreadable.operator +
-                verify.unreadable.agent_keys +
-                verify.unreadable.operator_tokens >
-              0
-                ? "warn"
-                : "ok"
-            }
-          >
-            Verify: fields {verify.unreadable.fields}, history {verify.unreadable.history},
-            operator {verify.unreadable.operator}, agent keys {verify.unreadable.agent_keys},
-            operator tokens {verify.unreadable.operator_tokens} unreadable.
-          </Notice>
+          <>
+            <Notice kind={unreadableTotal > 0 ? "warn" : "ok"}>
+              Verify finished: {unreadableTotal} unreadable rows.
+            </Notice>
+            <dl className="stats">
+              <div className="stat">
+                <dt>Fields</dt>
+                <dd>{verify.unreadable.fields}</dd>
+              </div>
+              <div className="stat">
+                <dt>History</dt>
+                <dd>{verify.unreadable.history}</dd>
+              </div>
+              <div className="stat">
+                <dt>Operator</dt>
+                <dd>{verify.unreadable.operator}</dd>
+              </div>
+              <div className="stat">
+                <dt>Agent keys</dt>
+                <dd>{verify.unreadable.agent_keys}</dd>
+              </div>
+              <div className="stat">
+                <dt>Operator tokens</dt>
+                <dd>{verify.unreadable.operator_tokens}</dd>
+              </div>
+            </dl>
+          </>
         ) : null}
       </div>
       <div className="card stack">
-        <h2 className="page-sub" style={{ margin: 0 }}>
-          Retention
-        </h2>
-        <p className="muted" style={{ margin: 0 }}>
-          Prunes history older than the retention window, keeping the 20 most
-          recent snapshots per field. Never touches live sessions or recovery codes.
-        </p>
-        <div className="row">
-          <Button
-            label="Run retention"
-            variant="danger"
-            onClick={() =>
-              setPending(() => async (token: string) => {
-                const data = await api<RetentionCounts>(
-                  "POST",
-                  "/api/admin/retention",
-                  undefined,
-                  { stepUpToken: token },
-                );
-                setCounts(data);
-              })
-            }
-          />
+        <div className="card-head">
+          <h2 className="card-title">Retention</h2>
+          <p className="card-desc">
+            Prunes history older than the retention window, keeping the 20 most
+            recent snapshots per field. Never touches live sessions or recovery codes.
+          </p>
+          <div className="row">
+            <Button
+              label="Run retention"
+              variant="danger"
+              onClick={() =>
+                setPending(() => async (token: string) => {
+                  const data = await api<RetentionCounts>(
+                    "POST",
+                    "/api/admin/retention",
+                    undefined,
+                    { stepUpToken: token },
+                  );
+                  setCounts(data);
+                })
+              }
+            />
+          </div>
         </div>
         {counts ? (
-          <p className="mono" style={{ margin: 0 }}>
-            {Object.entries(counts)
-              .map(([table, count]) => `${table}: ${count}`)
-              .join(" · ")}
-          </p>
+          <dl className="stats">
+            {Object.entries(counts).map(([table, count]) => (
+              <div key={table} className="stat">
+                <dt>{table}</dt>
+                <dd>{count}</dd>
+              </div>
+            ))}
+          </dl>
         ) : null}
       </div>
       {pending ? (

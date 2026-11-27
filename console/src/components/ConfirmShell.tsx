@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { focusPanelOnStaticClick, lockScroll, trapTab } from "./modal";
 
 // Shared shell for the confirmation dialogs (plain confirm and step-up):
-// scrim + a 420px right-hand panel (the drawer idiom, narrower) + Escape/
-// backdrop close + a Tab trap. Drawer keeps its own layout and form semantics.
+// a centred modal over a scrim + Escape/backdrop close + a Tab trap. The
+// sibling idiom: a confirmation is a question, not a side panel.
 export function ConfirmShell({
   title,
   meta,
@@ -27,6 +28,8 @@ export function ConfirmShell({
 
   // Pending deferred focus restore, cancelled when the effect re-runs.
   const restoreTimer = useRef<number | null>(null);
+
+  useEffect(() => lockScroll(), []);
 
   // Focus the panel when no child took focus via autoFocus, so Escape works
   // from the start. Destructive dialogs autoFocus Cancel, never the action.
@@ -59,38 +62,12 @@ export function ConfirmShell({
       onCancel();
       return;
     }
-    if (event.key !== "Tab") return;
-    // Trap Tab: without it, focus leaves the dialog and Escape stops working.
-    const el = panel.current;
-    if (!el) return;
-    const focusable = [...el.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-    )];
-    if (focusable.length === 0) {
-      event.preventDefault();
-      panel.current?.focus();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (!first || !last) return;
-    if (document.activeElement === el) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-      return;
-    }
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
+    trapTab(event, panel.current);
   };
 
   return (
     <div
-      className="scrim"
+      className="scrim center"
       role="dialog"
       aria-modal="true"
       aria-label={title}
@@ -103,18 +80,7 @@ export function ConfirmShell({
         className="drawer dialog"
         ref={panel}
         tabIndex={-1}
-        onMouseDown={(event) => {
-          // Keep Escape working when the operator clicks static copy: focus
-          // the panel, but do NOT preventDefault (text stays selectable) and
-          // never blur a field the operator is already typing in.
-          const target = event.target as HTMLElement;
-          if (
-            !target.closest("button, a[href], input, select, textarea, label")
-            && !panel.current?.contains(document.activeElement)
-          ) {
-            panel.current?.focus();
-          }
-        }}
+        onMouseDown={(event) => focusPanelOnStaticClick(event, panel.current)}
         onKeyDown={onKeyDown}
         onSubmit={(event) => {
           event.preventDefault();
@@ -122,8 +88,10 @@ export function ConfirmShell({
         }}
       >
         <div className="drawer-head">
-          <h2>{title}</h2>
-          {meta ? <div className="meta">{meta}</div> : null}
+          <div>
+            {meta ? <div className="drawer-kicker">{meta}</div> : null}
+            <h2>{title}</h2>
+          </div>
         </div>
         <div className="drawer-body stack">{children}</div>
       </form>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useState } from "react";
 import { ApiError, api } from "../api";
 import { useOneTime } from "../onetime";
 import { Button, Notice } from "../components/Field";
+import { EmptyState } from "../components/EmptyState";
 import { deviceCodeFromHash, displayTransferCode } from "../login";
 type Props = {
   onNeedsLogin: (deviceCode: string) => void;
@@ -90,10 +91,12 @@ export function Device({ onNeedsLogin, onDone }: Props) {
     return (
       <div className="auth-form-wrap">
         <div className="auth-form card stack">
-          <h1 className="page-title">Sign in first</h1>
-          <p className="page-sub">
-            Approving a CLI login needs a signed-in operator session.
-          </p>
+          <div>
+            <h1 className="auth-title">Sign in first</h1>
+            <p className="auth-lede">
+              Approving a CLI login needs a signed-in operator session.
+            </p>
+          </div>
           <Button
             label="Go to sign in"
             variant="primary"
@@ -108,8 +111,8 @@ export function Device({ onNeedsLogin, onDone }: Props) {
     <div className="auth-form-wrap">
       <div className="auth-form card stack">
         <div>
-          <h1 className="page-title">Approve CLI login</h1>
-          <p className="page-sub">
+          <h1 className="auth-title">Approve CLI login</h1>
+          <p className="auth-lede">
             Confirm this is your own command-line client before approving.
           </p>
         </div>
@@ -121,8 +124,8 @@ export function Device({ onNeedsLogin, onDone }: Props) {
               transfer code below into the CLI prompt now.
             </Notice>
             <label>
-              <span>Transfer code</span>
-              <input className="mono" readOnly value={displayTransferCode(transfer)} />
+              <span className="label-text">Transfer code</span>
+              <input className="mono" name="transfer-code" readOnly value={displayTransferCode(transfer)} />
             </label>
             {deadline ? (
               <p className="muted mono">Enter it in the CLI before {deadline}</p>
@@ -134,27 +137,19 @@ export function Device({ onNeedsLogin, onDone }: Props) {
                   void navigator.clipboard?.writeText(transfer).catch(() => undefined);
                 }}
               />
+              <Button label="Done" onClick={onDone} />
             </div>
-            <Button label="Done" onClick={onDone} />
           </>
         ) : lookup ? (
           <>
-            <table>
-              <tbody>
-                <tr>
-                  <th>Requesting IP</th>
-                  <td className="mono">{lookup.client_ip}</td>
-                </tr>
-                <tr>
-                  <th>Client</th>
-                  <td>{lookup.user_agent}</td>
-                </tr>
-                <tr>
-                  <th>Expires</th>
-                  <td className="mono">{lookup.expires_at}</td>
-                </tr>
-              </tbody>
-            </table>
+            <dl className="kv panel">
+              <dt>Requesting IP</dt>
+              <dd className="mono">{lookup.client_ip}</dd>
+              <dt>Client</dt>
+              <dd>{lookup.user_agent}</dd>
+              <dt>Expires</dt>
+              <dd className="mono">{lookup.expires_at}</dd>
+            </dl>
             <Notice kind="warn">
               If you did not start a CLI login, close this page without approving
               and check the audit log. Leaving it unapproved expires in a few
@@ -175,7 +170,7 @@ export function Device({ onNeedsLogin, onDone }: Props) {
             </div>
           </>
         ) : (
-          <p className="muted">Looking up the request…</p>
+          <EmptyState title={error ? "Cannot look up the request" : "Looking up the request…"} />
         )}
       </div>
     </div>

@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, status } from "../api";
-import { Button, Notice, TextField } from "../components/Field";
+import { Button, Notice, TextArea, TextField } from "../components/Field";
 import { Confirm } from "../components/Confirm";
 import { ConfirmStepUp } from "../components/ConfirmStepUp";
 import { Drawer } from "../components/Drawer";
+import { EmptyState } from "../components/EmptyState";
+import { PageHeader } from "../components/PageHeader";
+import { IconItems } from "../components/icons";
 import {
   emptyForm,
   formFromItem,
@@ -12,7 +15,7 @@ import {
   type FieldDraft,
   type ItemForm,
 } from "../items";
-import { MASK, truncate } from "../plain";
+import { MASK, stamp, truncate } from "../plain";
 import type { HistoryRow, HistorySnapshot, Item, ListRow, Page } from "../types";
 
 const PAGE = 50;
@@ -84,6 +87,9 @@ export function Items({ onSignOut }: { onSignOut: () => void }) {
   const [cursor, setCursor] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  // a failed fetch is not an empty vault: the list must not offer "New item"
+  // as if nothing existed
+  const [loadFailed, setLoadFailed] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   // a soft-deleted row must be removable from the list itself, without
@@ -101,6 +107,7 @@ export function Items({ onSignOut }: { onSignOut: () => void }) {
       if (next) query.set("cursor", next);
       const page = await api<Page<ListRow>>("GET", `/api/admin/items?${query}`);
       if (generation.current !== mine) return; // superseded by a refresh
+      setLoadFailed(false);
       setRows((prev) => {
         const merged = next ? [...prev, ...page.items] : page.items;
         // de-dupe by name: a racing page must never duplicate a row
@@ -118,6 +125,7 @@ export function Items({ onSignOut }: { onSignOut: () => void }) {
         onSignOut();
         return;
       }
+      setLoadFailed(true);
       setError(err instanceof ApiError ? err.message : "cannot load items");
     } finally {
       if (generation.current === mine) setLoading(false);
@@ -133,80 +141,112 @@ export function Items({ onSignOut }: { onSignOut: () => void }) {
     void load(null);
   });
 
-  return (
-    <>
-      <h1 className="page-title">Items</h1>
-      <p className="page-sub">
-        Named credentials. Secret fields stay masked until you reveal them.
-      </p>
-      {error ? <Notice kind="error">{error}</Notice> : null}
-      <div className="row" style={{ margin: "16px 0" }}>
-        <Button label="New item" variant="primary" onClick={() => setCreating(true)} />
-        <span className="row-end muted mono">{rows.length} shown</span>
-      </div>
-      <div className="card" style={{ padding: 0 }}>
-        {rows.length === 0 && !loading ? (
-          <div className="empty">No items yet. Create one to give your agents something to read.</div>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th className="num">Fields</th>
-                <th className="num">Revision</th>
-                <th>Updated</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => {
-                const secrets = row.fields.filter((f) => f.secret).length;
-                return (
-                  <tr key={row.name}>
-                    <td>
-                      <span className="mono" title={row.name}>
+  // loading, empty and populated are three distinct states: a list that has
+  // not loaded yet must never read as an empty vault
+  const list = () => {
+    if (rows.length === 0) {
+      if (loading) return <EmptyState title="Loading items…" />;
+      // a failed fetch must never read as an empty vault under the error notice
+      if (loadFailed) return <EmptyState title="Cannot load items" />;
+      return (
+        <EmptyState
+          mark={<IconItems size={22} />}
+          title="No items yet"
+          action={<Button label="New item" variant="primary" onClick={() => setCreating(true)} />}
+        >
+          Create one to give your agents something to read.
+        </EmptyState>
+      );
+    }
+    return (
+      <>
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th className="num">Fields</th>
+              <th className="num">Revision</th>
+              <th>Updated</th>
+              <th className="actions-cell" aria-label="Actions" />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              const secrets = row.fields.filter((f) => f.secret).length;
+              return (
+                <tr key={row.name}>
+                  <td data-label="Name">
+                    <span className="cell-stack">
+                      <span className="mono cell-main" title={row.name}>
                         {truncate(row.name, 40)}
                       </span>
-                      {row.deleted ? <span className="pill danger"> deleted</span> : null}
-                    </td>
-                    <td className="num">
+                      {row.deleted ? <span className="pill danger">deleted</span> : null}
+                    </span>
+                  </td>
+                  <td className="num" data-label="Fields">
+                    <span className="cell-stack">
                       {row.fields.length}
-                      <span className="muted"> ({secrets} secret)</span>
-                    </td>
-                    <td className="num">{row.revision}</td>
-                    <td className="mono muted">{row.updated_at.slice(0, 19).replace("T", " ")}</td>
-                    <td>
+                      <span className="muted">
+                        {" "}
+                        · {secrets} {secrets === 1 ? "secret" : "secrets"}
+                      </span>
+                    </span>
+                  </td>
+                  <td className="num" data-label="Revision">
+                    {row.revision}
+                  </td>
+                  <td data-label="Updated">
+                    <span className="mono muted">{stamp(row.updated_at)}</span>
+                  </td>
+                  <td className="actions-cell" data-label="">
+                    <span className="actions">
                       <Button label="Open" variant="ghost" onClick={() => setOpen(row.name)} />
                       {row.deleted ? (
-                        <>
-                          {" "}
-                          <Button
-                            label="Purge"
-                            variant="danger"
-                            onClick={() => {
-                              purgeState.reset();
-                              setPurge({ name: row.name });
-                            }}
-                          />
-                        </>
+                        <Button
+                          label="Purge"
+                          variant="danger"
+                          onClick={() => {
+                            purgeState.reset();
+                            setPurge({ name: row.name });
+                          }}
+                        />
                       ) : null}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-      </div>
-      {cursor ? (
-        <div className="row" style={{ marginTop: 14 }}>
-          <Button
-            label={loading ? "Loading…" : "Load more"}
-            onClick={() => void load(cursor)}
-            disabled={loading}
-          />
+                    </span>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <div className="table-foot">
+          <span>
+            {rows.length} shown
+            {cursor ? " · more available" : ""}
+          </span>
+          {cursor ? (
+            <Button
+              label={loading ? "Loading…" : "Load more"}
+              onClick={() => void load(cursor)}
+              disabled={loading}
+            />
+          ) : null}
         </div>
-      ) : null}
+      </>
+    );
+  };
+
+  return (
+    <>
+      <PageHeader
+        kicker="Vault"
+        title="Items"
+        lede="Named credentials. Secret fields stay masked until you reveal them."
+        actions={
+          <Button label="New item" variant="primary" onClick={() => setCreating(true)} />
+        }
+      />
+      {error ? <Notice kind="error">{error}</Notice> : null}
+      <div className="card flush">{list()}</div>
       {creating ? (
         <ItemDrawer
           existing={null}
@@ -481,137 +521,10 @@ function ItemDrawer({
       title={existing ?? "New item"}
       meta={item ? `revision ${item.revision}` : "unsaved"}
       onClose={onClose}
-    >
-      <div className="stack">
-        {error ? <Notice kind="error">{error}</Notice> : null}
-        {revealError ? <Notice kind="error">{revealError}</Notice> : null}
-        {item?.deleted ? <Notice kind="warn">This item is soft-deleted.</Notice> : null}
-        {renaming ? (
-          <div className="row">
-            <TextField
-              label="New name"
-              value={renameTo}
-              onChange={setRenameTo}
-              hint="lowercase, digits, dot, dash, underscore, or Chinese characters — unsaved edits below are discarded"
-            />
-            <Button
-              label="Apply rename"
-              variant="primary"
-              onClick={() => void rename()}
-              disabled={busy}
-            />
-            <Button label="Cancel" variant="ghost" onClick={() => setRenaming(false)} />
-          </div>
-        ) : null}
-        {!existing ? (
-          <TextField
-            label="Name"
-            value={form.name}
-            onChange={(next) => setForm((prev) => ({ ...prev, name: next }))}
-            hint="lowercase, digits, dot, dash, underscore, or Chinese characters"
-          />
-        ) : null}
-        <label>
-          <span>Notes</span>
-          <textarea
-            value={form.notes}
-            onChange={(event) => setForm((prev) => ({ ...prev, notes: event.target.value }))}
-          />
-        </label>
-        <fieldset className="stack">
-          <span className="muted">Fields</span>
-          {form.fields.map((field, index) => (
-            <div key={`${field.name}-${index}`} className="card stack">
-              <div className="row">
-                <span className="mono">{field.name}</span>
-                <span className={`pill ${field.secret ? "accent" : ""}`}>
-                  {field.secret ? "secret" : "plain"}
-                </span>
-                <span className="row-end" />
-                <Button
-                  label="Remove"
-                  variant="ghost"
-                  onClick={() =>
-                    setForm((prev) => ({
-                      ...prev,
-                      fields: prev.fields.filter((_, i) => i !== index),
-                    }))
-                  }
-                />
-              </div>
-              <label>
-                <span>Value</span>
-                <input
-                  value={field.secret && field.untouched ? "" : field.value}
-                  placeholder={field.secret && field.untouched ? "unchanged (stored sealed)" : ""}
-                  onChange={(event) => patch(index, { value: event.target.value, untouched: false })}
-                />
-              </label>
-              {field.secret ? (
-                <div className="row">
-                  <Button
-                    label="Reveal"
-                    variant="ghost"
-                    onClick={() => void reveal(field.name)}
-                    disabled={revealing || !existing}
-                  />
-                  {revealed[field.name] !== undefined ? (
-                    <span className="mono" data-testid={`revealed-${field.name}`}>
-                      {revealed[field.name]}
-                    </span>
-                  ) : (
-                    <span className="secret">{MASK}</span>
-                  )}
-                </div>
-              ) : null}
-            </div>
-          ))}
-          <div className="row">
-            <input
-              placeholder="new field name (UPPER_SNAKE)"
-              onKeyDown={(event) => {
-                if (event.key !== "Enter") return;
-                event.preventDefault();
-                const value = event.currentTarget.value.trim();
-                if (value) {
-                  noteField(value);
-                  event.currentTarget.value = "";
-                }
-              }}
-            />
-            <span className="muted">Press Enter to add</span>
-          </div>
-        </fieldset>
-        <div className="row">
-          {item && !item.deleted && existing ? (
-            <Button
-              label="Rename"
-              variant="ghost"
-              onClick={() => {
-                setRenaming(true);
-                setRenameTo(existing);
-              }}
-              disabled={busy}
-            />
-          ) : null}
-          <Button
-            label="Save"
-            variant="primary"
-            onClick={() => void save()}
-            disabled={busy || (Boolean(existing) && (!item || item.name !== existing))}
-          />
+      footer={
+        <>
           {existing ? (
-            <>
-              <Button label="History" variant="ghost" onClick={() => void loadHistory()} />
-              <Button
-                label="Delete"
-                variant="danger"
-                onClick={() => void remove()}
-              />
-            </>
-          ) : null}
-          {item?.deleted ? (
-            <Button label="Restore" onClick={() => void restore()} />
+            <Button label="Delete" variant="danger" onClick={() => void remove()} />
           ) : null}
           {item?.deleted ? (
             <Button
@@ -623,45 +536,173 @@ function ItemDrawer({
               }}
             />
           ) : null}
+          <span className="spacer" />
+          {item?.deleted ? <Button label="Restore" onClick={() => void restore()} /> : null}
+          {item && !item.deleted && existing ? (
+            <Button
+              label="Rename"
+              variant="ghost"
+              onClick={() => {
+                setRenaming(true);
+                setRenameTo(existing);
+              }}
+              disabled={busy}
+            />
+          ) : null}
+          {existing ? (
+            <Button label="History" variant="ghost" onClick={() => void loadHistory()} />
+          ) : null}
+          <Button
+            label="Save"
+            variant="primary"
+            onClick={() => void save()}
+            disabled={busy || (Boolean(existing) && (!item || item.name !== existing))}
+          />
+        </>
+      }
+    >
+      {error ? <Notice kind="error">{error}</Notice> : null}
+      {revealError ? <Notice kind="error">{revealError}</Notice> : null}
+      {item?.deleted ? <Notice kind="warn">This item is soft-deleted.</Notice> : null}
+      {renaming ? (
+        <div className="panel stack">
+          <TextField
+            label="New name"
+            value={renameTo}
+            onChange={setRenameTo}
+            hint="lowercase, digits, dot, dash, underscore, or Chinese characters — unsaved edits below are discarded"
+            autoFocus
+          />
+          <div className="row">
+            <Button
+              label="Apply rename"
+              variant="primary"
+              onClick={() => void rename()}
+              disabled={busy}
+            />
+            <Button label="Cancel" variant="ghost" onClick={() => setRenaming(false)} />
+          </div>
         </div>
-        {history ? (
-          <div className="card">
-            <h3 className="page-sub" style={{ margin: "0 0 10px" }}>
-              History
-            </h3>
-            {history.length === 0 ? (
-              <p className="muted">No prior values yet.</p>
-            ) : (
-              <ul className="stack" style={{ listStyle: "none", padding: 0, margin: 0 }}>
-                {history.map((row) => (
-                  <li key={row.id} className="row">
-                    <span className="mono">{historyLabel(row)}</span>
-                    <span className="row-end" />
-                    <Button
-                      label="Reveal"
-                      variant="ghost"
-                      onClick={() => void revealSnapshot(row.id)}
-                      disabled={revealing}
-                    />
-                  </li>
-                ))}
-              </ul>
-            )}
-            {snapshot ? (
-              <p className="mono">
-                {snapshot.name} = {snapshot.value}
-              </p>
+      ) : null}
+      {!existing ? (
+        <TextField
+          label="Name"
+          value={form.name}
+          onChange={(next) => setForm((prev) => ({ ...prev, name: next }))}
+          hint="lowercase, digits, dot, dash, underscore, or Chinese characters"
+          autoFocus
+        />
+      ) : null}
+      <TextArea
+        label="Notes"
+        name="notes"
+        value={form.notes}
+        onChange={(next) => setForm((prev) => ({ ...prev, notes: next }))}
+      />
+      <fieldset className="stack">
+        <span className="group-label">Fields</span>
+        {form.fields.map((field, index) => (
+          <div key={`${field.name}-${index}`} className="panel stack">
+            <div className="row">
+              <span className="mono cell-main" title={field.name}>
+                {field.name}
+              </span>
+              <span className={`pill ${field.secret ? "accent" : ""}`}>
+                {field.secret ? "secret" : "plain"}
+              </span>
+              <span className="row-end" />
+              <Button
+                label="Remove"
+                variant="ghost"
+                onClick={() =>
+                  setForm((prev) => ({
+                    ...prev,
+                    fields: prev.fields.filter((_, i) => i !== index),
+                  }))
+                }
+              />
+            </div>
+            <label>
+              <span className="label-text">Value</span>
+              <input
+                value={field.secret && field.untouched ? "" : field.value}
+                placeholder={field.secret && field.untouched ? "unchanged (stored sealed)" : ""}
+                onChange={(event) => patch(index, { value: event.target.value, untouched: false })}
+              />
+            </label>
+            {field.secret ? (
+              <div className="row">
+                <Button
+                  label="Reveal"
+                  variant="ghost"
+                  onClick={() => void reveal(field.name)}
+                  disabled={revealing || !existing}
+                />
+                {revealed[field.name] !== undefined ? (
+                  <code className="secret-value" data-testid={`revealed-${field.name}`}>
+                    {revealed[field.name]}
+                  </code>
+                ) : (
+                  <span className="secret">{MASK}</span>
+                )}
+              </div>
             ) : null}
-            {historyCursor ? (
+          </div>
+        ))}
+        <div className="row">
+          <input
+            placeholder="new field name (UPPER_SNAKE)"
+            aria-label="New field name"
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              const value = event.currentTarget.value.trim();
+              if (value) {
+                noteField(value);
+                event.currentTarget.value = "";
+              }
+            }}
+          />
+          <span className="muted">Press Enter to add</span>
+        </div>
+      </fieldset>
+      {history ? (
+        <div className="panel stack">
+          <span className="group-label">History</span>
+          {history.length === 0 ? (
+            <p className="muted">No prior values yet.</p>
+          ) : (
+            <ul className="list">
+              {history.map((row) => (
+                <li key={row.id} className="row">
+                  <span className="mono">{historyLabel(row)}</span>
+                  <span className="row-end" />
+                  <Button
+                    label="Reveal"
+                    variant="ghost"
+                    onClick={() => void revealSnapshot(row.id)}
+                    disabled={revealing}
+                  />
+                </li>
+              ))}
+            </ul>
+          )}
+          {snapshot ? (
+            <code className="secret-value">
+              {snapshot.name} = {snapshot.value}
+            </code>
+          ) : null}
+          {historyCursor ? (
+            <div className="row">
               <Button
                 label="Load older"
                 variant="ghost"
                 onClick={() => void loadHistory(historyCursor)}
               />
-            ) : null}
-          </div>
-        ) : null}
-      </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {confirmPurge && existing ? (
         <PurgeConfirm
           name={existing}

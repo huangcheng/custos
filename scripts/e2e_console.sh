@@ -5,7 +5,9 @@
 # through a real browser: static contract, login, CSRF recovery after a reload,
 # masked listing and drawer, session-only reveal (rev 41), If-Match conflict and
 # delete/restore, key mint (token shown once, and it must authenticate), the
-# key.mint audit row, and the device hand-off fragment.
+# key.mint audit row, the device hand-off fragment, and the DESIGN.md invariants
+# measured on the rendered page (palette tokens, control metrics, header
+# rhythm, filter alignment, drawer/dialog craft, phone-width layout).
 #
 # Requires a browser driver command in CUSTOS_BROWSER_CMD (a command that runs
 # a JS driver script from stdin, e.g. `ego-browser nodejs`). With no driver the
@@ -371,6 +373,23 @@ await until(
   "the drawer to render its fields",
 );
 ok(!(await leaked(SECRET_VALUE)), "drawer masks the secret before reveal (text, inputs, attributes)");
+// drawer craft: the action bar is pinned to the bottom edge and the fields
+// sit in sunk panels, not in a second frame inside the card
+ok(
+  await page.evaluate(() => {
+    const r = (el) => el.getBoundingClientRect();
+    const drawer = document.querySelector(".drawer");
+    const foot = document.querySelector(".drawer-foot");
+    const panel = document.querySelector(".drawer .panel");
+    return !!foot && !!panel
+      && Math.abs(r(foot).bottom - r(drawer).bottom) <= 1
+      && document.querySelectorAll(".drawer .card").length === 0
+      && getComputedStyle(panel).borderRadius === "12px"
+      && getComputedStyle(document.documentElement).overflow === "hidden"
+      && !!document.querySelector('.drawer-close[aria-label="Close"]');
+  }),
+  "the item drawer pins its action bar, uses sunk panels, locks the page behind it and offers a Close control",
+);
 // the drawer renders before its GET resolves: wait for the Reveal button itself
 await until(
   () =>
@@ -784,6 +803,21 @@ ok(
 );
 await clickWhenReady("^Mint key$", null, "open the mint drawer");
 await until(() => page.evaluate(() => !!document.querySelector(".drawer form")), "the mint drawer");
+// the invariants every drawer shares (the item drawer's sticky action bar is
+// its own check above; this form keeps its submit inside the form by contract)
+ok(
+  await page.evaluate(() => {
+    const r = (el) => el.getBoundingClientRect();
+    const drawer = document.querySelector(".drawer");
+    return drawer.querySelectorAll(".card").length === 0
+      && !!drawer.querySelector('.drawer-close[aria-label="Close"]')
+      && getComputedStyle(document.documentElement).overflow === "hidden"
+      // the cap is min(540px, viewport): compare against that, so a regression
+      // to a full-width drawer fails at any viewport
+      && Math.abs(r(drawer).width - Math.min(540, document.documentElement.clientWidth)) <= 1;
+  }),
+  "the mint drawer nests no cards, offers a Close control, locks the page behind it and stays within 540px",
+);
 ok(
   await page.evaluate(() => {
     const scrim = document.querySelector(".scrim");
@@ -1043,7 +1077,7 @@ const designProbe = () => page.evaluate(() => {
     inputHeight: textInput ? Math.round(textInput.getBoundingClientRect().height) : null,
   };
 });
-for (const route of ["/items", "/audit"]) {
+for (const route of ["/items", "/keys", "/audit"]) {
   await page.goto(`${BASE}${route}`);
   await until(() => page.evaluate(() => !!document.querySelector("table th")), `the ${route} table`);
   const d = await designProbe();
@@ -1075,6 +1109,130 @@ for (const route of ["/items", "/audit"]) {
     route !== "/audit" || d.inputHeight === 44,
     `${route}: visible inputs are the sibling 44px (got ${d.inputHeight})`,
   );
+}
+
+// 10d. layout craft (sibling parity): one header rhythm with the action level
+// with the title, aligned filter fields, row actions flush right, a sign-out
+// that reads on the ink rail, and — at phone width — a top bar that sizes to
+// its content with labelled card-rows instead of a sideways-scrolling table.
+const craftProbe = () => page.evaluate(() => {
+  const cs = (el) => getComputedStyle(el);
+  const r = (el) => el.getBoundingClientRect();
+  const q = (s) => document.querySelector(s);
+  const qa = (s) => [...document.querySelectorAll(s)];
+  const top = (el) => Math.round(r(el).top);
+  const lum = (c) => {
+    const m = c.match(/\d+/g).map(Number);
+    const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+    return 0.2126 * f(m[0]) + 0.7152 * f(m[1]) + 0.0722 * f(m[2]);
+  };
+  const contrast = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, n) => n - p); return (x + 0.05) / (y + 0.05); };
+  const h1 = q("h1.page-title");
+  const action = q(".page-actions button");
+  const signout = q(".nav-signout");
+  const sidebar = q(".sidebar");
+  const fields = qa(".filter-grid input, .filter-grid select").filter((el) => r(el).width > 0);
+  const firstRow = qa(".card.flush tbody tr")[0];
+  const lastTd = firstRow ? [...firstRow.querySelectorAll("td")].pop() : null;
+  const actions = firstRow ? firstRow.querySelector(".actions") : null;
+  return {
+    h1Top: h1 ? top(h1) : null,
+    actionTop: action ? top(action) : null,
+    hasKicker: !!q(".page-kicker"),
+    signoutContrast: signout ? contrast(cs(signout).color, cs(sidebar).backgroundColor) : null,
+    fieldTops: fields.map(top),
+    fieldHeights: fields.map((el) => Math.round(r(el).height)),
+    actionsInset: actions && lastTd ? Math.round(r(lastTd).right - r(actions).right) : null,
+    thActionsAlign: (() => { const th = q("th.actions-cell"); return th ? cs(th).textAlign : null; })(),
+    labelled: firstRow
+      ? [...firstRow.querySelectorAll("td")].every((td) => td.hasAttribute("data-label"))
+      : null,
+  };
+});
+// The craft metrics are measured at a pinned desktop size: the driver's
+// default viewport is not part of the contract, and "filter fields share one
+// row" only holds from ~1320px up. The CDP bridge is a driver capability —
+// name it if it is missing instead of dying on an opaque TypeError.
+if (typeof page.cdp !== "function") {
+  throw new Error("the browser driver exposes no CDP bridge (page.cdp): the viewport-pinned checks cannot run");
+}
+await page.cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+try {
+  for (const route of ["/items", "/keys", "/audit"]) {
+    await page.goto(`${BASE}${route}`);
+    await until(() => page.evaluate(() => !!document.querySelector("table th")), `the ${route} table`);
+    const c = await craftProbe();
+    ok(c.hasKicker, `${route}: the page header carries its mono kicker`);
+    if (route !== "/audit") {
+      ok(
+        c.actionTop !== null && Math.abs(c.actionTop - c.h1Top) <= 2,
+        `${route}: the header action is level with the title's first line (${c.actionTop} vs ${c.h1Top})`,
+      );
+      ok(c.thActionsAlign === "right", `${route}: the actions column is right-aligned (${c.thActionsAlign})`);
+      // the audit table has no action column; only inventories carry row actions
+      ok(
+        c.actionsInset !== null && c.actionsInset >= 0 && c.actionsInset <= 24,
+        `${route}: row actions sit flush with the cell's padding edge (${c.actionsInset}px)`,
+      );
+    }
+    ok(
+      c.signoutContrast >= 4.5,
+      `${route}: the sidebar sign-out meets AA on the ink rail (${c.signoutContrast?.toFixed(1)}:1)`,
+    );
+    ok(c.labelled === true, `${route}: every table cell carries its narrow-screen label`);
+    if (route === "/audit") {
+      // at 1440 the five filter fields fit on one row: they must share a top
+      ok(
+        c.fieldTops.length >= 3 && new Set(c.fieldTops).size === 1,
+        `${route}@1440: filter fields align on one row (tops ${JSON.stringify(c.fieldTops)})`,
+      );
+      ok(
+        c.fieldHeights.every((h) => h === 44),
+        `${route}: filter fields keep the sibling 44px (${JSON.stringify(c.fieldHeights)})`,
+      );
+    }
+  }
+} finally {
+  await page.cdp("Emulation.clearDeviceMetricsOverride", {});
+}
+// phone width: the top bar must size to its content (an implicit grid row
+// once stretched it to the leftover viewport height on short pages) and the
+// page must not scroll sideways
+await page.cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+try {
+  for (const route of ["/items", "/audit", "/settings"]) {
+    await page.goto(`${BASE}${route}`);
+    // wait for the data, not the first paint: `main .card` exists while the
+    // inventory still shows its loading state (and /audit's filter form is a
+    // card of its own), which would measure a half-rendered page
+    const ready = route === "/settings" ? "main .card" : "table th";
+    await until(() => page.evaluate((sel) => !!document.querySelector(sel), ready), `the ${route} content`);
+    // `narrow`, not `n`: `n` is the driver-wide CHECK counter
+    const narrow = await page.evaluate(() => {
+      const de = document.documentElement;
+      const sb = document.querySelector(".sidebar");
+      if (!sb) throw new Error("no .sidebar on the page");
+      const td = document.querySelector(".card.flush tbody td");
+      const thead = document.querySelector(".card.flush thead");
+      return {
+        overflow: de.scrollWidth > de.clientWidth,
+        sidebarH: Math.round(sb.getBoundingClientRect().height),
+        tdDisplay: td ? getComputedStyle(td).display : null,
+        theadDisplay: thead ? getComputedStyle(thead).display : null,
+      };
+    });
+    ok(!narrow.overflow, `${route}@390: no horizontal page overflow`);
+    // bounded both ways: a collapsed bar must not pass as "sizes to its content"
+    ok(narrow.sidebarH > 0 && narrow.sidebarH <= 130, `${route}@390: the top bar sizes to its content (${narrow.sidebarH}px)`);
+    if (route !== "/settings") {
+      ok(
+        narrow.tdDisplay === "flex" && narrow.theadDisplay === "none",
+        `${route}@390: table rows are labelled cards (${narrow.tdDisplay}, thead ${narrow.theadDisplay})`,
+      );
+    }
+  }
+} finally {
+  await page.cdp("Emulation.clearDeviceMetricsOverride", {});
 }
 
 // 11. TOTP two-step sign-in (rev 37 login UX): enable TOTP through the real
@@ -1289,6 +1447,25 @@ let recoveryCodes = [];
   await until(() => page.evaluate(() =>
     (document.querySelector(".scrim form")?.textContent || "").includes("Authenticator code")),
     "the step-up dialog to ask for the TOTP factor");
+  // a confirmation is a centred question (sibling idiom), not a side panel
+  ok(
+    await page.evaluate(async () => {
+      const r = (el) => el.getBoundingClientRect();
+      const dialog = document.querySelector(".drawer.dialog");
+      const scrim = document.querySelector(".scrim.center");
+      if (!dialog || !scrim) return false;
+      // measure once the pop animation has landed (resolves at once under
+      // reduced motion) instead of sleeping a guessed duration
+      await Promise.all(dialog.getAnimations({ subtree: true }).map((a) => a.finished));
+      const [dx, dh] = [r(dialog).top, r(dialog).height];
+      const [sx, sh] = [r(scrim).top, r(scrim).height];
+      return Math.abs((dx + dh / 2) - (sx + sh / 2)) <= 2
+        && Math.abs((r(dialog).left + r(dialog).width / 2) - (r(scrim).left + r(scrim).width / 2)) <= 2
+        // 26rem, capped by the viewport (the scrim's 24px padding each side)
+        && Math.abs(r(dialog).width - Math.min(416, r(scrim).width - 48)) <= 1;
+    }),
+    "the step-up confirmation is centred and compact",
+  );
   ok(
     await page.evaluate(() =>
       (document.querySelector(".scrim form")?.textContent || "").includes("permanently destroys")),
