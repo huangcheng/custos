@@ -35,6 +35,7 @@ from custos.items import (
     force_drop,
     patch_item,
     put_item,
+    rename_field,
     rename_item,
     soft_delete,
 )
@@ -250,6 +251,26 @@ async def rename_one(
             session, request.app.state.session_maker,
             request.app.state.vault, p, name, new_name,
         )
+        await session.commit()
+    _etag(response, result["revision"])
+    return result
+
+
+@router.post("/items/{name}/fields/{field}/rename")
+async def rename_field_one(
+    name: str, field: str, request: Request, response: Response,
+    p: AdminPrincipal = Depends(require_admin),
+) -> dict[str, Any]:
+    """Rename one field of a live item (rev 46). Body `{"name": "<new>"}`:
+    only the field's name moves — the sealed value is untouched and history
+    follows the field. Gated like the item rename (rev 43): session or admin
+    token, no step-up — a token that can already PUT the item gains nothing."""
+    body = await _json_body(request)
+    new_name = body.get("name")
+    if not isinstance(new_name, str):
+        raise AppError("invalid", "name must be a string")
+    async with request.app.state.session_maker() as session:
+        result = await rename_field(session, p, name, field, new_name)
         await session.commit()
     _etag(response, result["revision"])
     return result

@@ -266,3 +266,99 @@ async def test_cjk_item_names_round_trip(admin_stack) -> None:
         for bad in ("BadName", "bad name", "密钥🚀"):
             r = await client.post("/api/admin/items", headers=hdr, json=body(bad))
             assert r.status_code == 422, bad
+
+
+async def test_rename_field(admin_stack) -> None:
+    """rev 46: a field rename moves only the name — the sealed value is never
+    re-encrypted, history follows the field, revision bumps, the write is
+    audited; collisions, bad grammar, unknown fields and deleted items are
+    refused."""
+    async with admin_stack() as (client, maker, h):
+        csrf = await h["login"](client)
+        hdr = {"x-csrf-token": csrf}
+        created = await _seed(client, csrf, "field-rename")
+        assert created["revision"] == 1
+        # one value change so the field has a history row under its old name
+        put = await client.put("/api/admin/items/field-rename", headers=hdr, json=body(
+            notes="n" * 300, fields=[
+                {"name": "TOKEN", "secret": True, "value": "cu-test-rotated"},
+                {"name": "REGION", "secret": False, "value": "eu"},
+            ]))
+        assert put.status_code == 200, put.text
+        assert put.json()["revision"] == 2
+        hist = await client.get("/api/admin/items/field-rename/history")
+        assert [row["name"] for row in hist.json()["items"]] == ["TOKEN"]
+
+        # a sibling field already holds the name → 409, nothing moves
+        r = await client.post("/api/admin/items/field-rename/fields/TOKEN/rename",
+                              headers=hdr, json={"name": "REGION"})
+        assert r.status_code == 409 and r.json()["code"] == "conflict"
+        # field grammar → 422
+        r = await client.post("/api/admin/items/field-rename/fields/TOKEN/rename",
+                              headers=hdr, json={"name": "token"})
+        assert r.status_code == 422 and r.json()["code"] == "invalid"
+        # unknown field → 404
+        r = await client.post("/api/admin/items/field-rename/fields/NOPE/rename",
+                              headers=hdr, json={"name": "TOKEN"})
+        assert r.status_code == 404
+        # same name → a no-op that does not bump the revision
+        r = await client.post("/api/admin/items/field-rename/fields/TOKEN/rename",
+                              headers=hdr, json={"name": "TOKEN"})
+        assert r.status_code == 200 and r.json()["revision"] == 2
+
+        r = await client.post("/api/admin/items/field-rename/fields/TOKEN/rename",
+                              headers=hdr, json={"name": "ACCESS_KEY"})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"name": "field-rename", "revision": 3,
+                            "field": {"name": "ACCESS_KEY", "secret": True}}
+        got = await client.get("/api/admin/items/field-rename")
+        assert [f["name"] for f in got.json()["fields"]] == ["ACCESS_KEY", "REGION"]
+        assert {"name": "ACCESS_KEY", "secret": True} in got.json()["fields"]
+        # the sealed value survived untouched (and only a reveal produces it)
+        r = await client.get("/api/admin/items/field-rename/reveal")
+        values = {f["name"]: f.get("value") for f in r.json()["fields"]}
+        assert values["ACCESS_KEY"] == "cu-test-rotated"
+        # history followed the field: listed under the new name, old name gone
+        hist = await client.get("/api/admin/items/field-rename/history")
+        assert [row["name"] for row in hist.json()["items"]] == ["ACCESS_KEY"]
+        snap = hist.json()["items"][0]
+        r = await client.get(f"/api/admin/items/field-rename/history/{snap['id']}/reveal")
+        assert r.status_code == 200 and r.json()["value"] == SECRET_VAL
+        # the move is audited with both names
+        from sqlalchemy import select as _select
+
+        from custos.db.models import AuditRow
+
+        async with maker() as s:
+            row = (await s.execute(
+                _select(AuditRow).where(AuditRow.action == "field.rename")
+            )).scalars().first()
+            assert row is not None and row.item_name == "field-rename"
+            assert row.detail["field"] == "ACCESS_KEY" and row.detail["from"] == "TOKEN"
+            assert row.detail["pre_revision"] == 2 and row.detail["revision"] == 3
+        # a stale edit drawer (old revision) fails its If-Match and changes nothing
+        stale = {"x-csrf-token": csrf, "If-Match": '"2"'}
+        r = await client.put("/api/admin/items/field-rename", headers=stale, json=body(
+            notes="n" * 300, fields=[
+                {"name": "ACCESS_KEY", "secret": True},
+                {"name": "REGION", "secret": False, "value": "eu"},
+            ]))
+        assert r.status_code == 409 and "revision mismatch" in r.json()["message"]
+        assert (await client.get("/api/admin/items/field-rename")).json()["revision"] == 3
+        # gated like the item rename (rev 43): an admin token may rename too —
+        # a token that can already PUT the item gains nothing from this route
+        client.cookies.clear()  # cookie+bearer together is a pinned 401
+        plain = await h["mint_co"]()
+        r = await client.post("/api/admin/items/field-rename/fields/ACCESS_KEY/rename",
+                              headers=bearer(plain), json={"name": "TOKEN"})
+        assert r.status_code == 200, r.text
+        assert r.json()["revision"] == 4
+        # the session still works after the token write; soft-deleted items
+        # cannot be renamed field-wise (restore first)
+        csrf = await h["login"](client)
+        hdr = {"x-csrf-token": csrf}
+        assert (await client.delete("/api/admin/items/field-rename",
+                                   headers=hdr)).status_code == 204
+        r = await client.post("/api/admin/items/field-rename/fields/TOKEN/rename",
+                              headers=hdr, json={"name": "ACCESS_KEY"})
+        assert r.status_code == 404

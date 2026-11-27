@@ -788,6 +788,216 @@ ok(RESTORE === 200, `restore undeletes the item (status ${RESTORE})`);
   ok(true, "renaming onto a taken name shows the conflict notice");
 }
 
+// 6d. rename a field from the drawer (rev 46): the sealed value and the
+// history move with the field; a sibling name is refused with a notice; the
+// console re-seeds its form from the server afterwards, refreshes the list
+// row, and its client guards (invalid / unchanged target) hold
+{
+  const FIELD_NEXT = "cu-test-field-rename-v2";
+  const csrf = await page.evaluate(async () =>
+    (await (await fetch("/api/auth/status", { credentials: "same-origin" })).json()).csrf_token);
+  await page.goto(`${BASE}/items`);
+  await until(() => page.evaluate(({ item }) =>
+    [...document.querySelectorAll("tr")].some((r) => r.textContent.includes(item)),
+    { item: ITEM }), "the item row after reload");
+  // one value change first, so TOKEN carries history under its old name —
+  // a PATCH touches only that field (a PUT rebuilt from the masked shape would
+  // blank every other sealed field). Remember that snapshot by id: history is
+  // item-scoped, so the move is proven on that row, not on "every row".
+  const probe = await page.evaluate(async ({ item, csrf, next }) => {
+    const res = await fetch(`/api/admin/items/${encodeURIComponent(item)}`, {
+      method: "PATCH", credentials: "same-origin",
+      headers: { "content-type": "application/json", "x-csrf-token": csrf },
+      body: JSON.stringify({ fields: [{ name: "TOKEN", secret: true, value: next }] }),
+    });
+    if (res.status !== 200) throw new Error(`field probe patch: ${res.status}`);
+    const revision = (await res.json()).revision;
+    const hist = await (await fetch(`/api/admin/items/${encodeURIComponent(item)}/history`, {
+      credentials: "same-origin",
+    })).json();
+    const snap = hist.items.find((r) => r.name === "TOKEN");
+    if (!snap) throw new Error("the probe left no TOKEN history row");
+    return { revision, snapshotId: snap.id };
+  }, { item: ITEM, csrf, next: FIELD_NEXT });
+  await page.evaluate(({ item }) => {
+    const row = [...document.querySelectorAll("tr")].find((r) => r.textContent.includes(item));
+    if (!row) throw new Error("item row not found");
+    [...row.querySelectorAll("button")].find((b) => /^Open$/.test(b.textContent.trim())).click();
+  }, { item: ITEM });
+  await until(() => page.evaluate(() => !!document.querySelector(".drawer .panel")),
+    "the item drawer with its field panels");
+  const panelNames = () => page.evaluate(() =>
+    [...document.querySelectorAll(".drawer .panel .cell-main")]
+      .map((el) => el.textContent.trim())
+      .filter((n) => /^[A-Z][A-Z0-9_]*$/.test(n)));
+  const hasRenameInput = () => page.evaluate(() =>
+    [...document.querySelectorAll(".drawer input")].some(
+      (i) => i.closest("label")?.textContent.startsWith("New field name")));
+  const drawerRevision = () => page.evaluate(() =>
+    Number((document.querySelector(".drawer-kicker")?.textContent || "").replace(/\D+/g, "")));
+  const openFieldRename = async (from) => {
+    await page.evaluate(({ from }) => {
+      const panel = [...document.querySelectorAll(".drawer .panel")]
+        .find((p) => p.querySelector(".cell-main")?.textContent.trim() === from);
+      if (!panel) throw new Error(`no field panel named ${from}`);
+      const button = [...panel.querySelectorAll("button")]
+        .find((b) => b.textContent.trim() === "Rename field");
+      if (!button) throw new Error(`no Rename field button on ${from}`);
+      button.click();
+    }, { from });
+    // only the field rename renders this input (the item rename reads "New name")
+    await until(() => hasRenameInput(), "the field rename input");
+  };
+  const fillFieldRename = async (to) => {
+    await page.evaluate(({ to }) => {
+      const input = [...document.querySelectorAll(".drawer input")].find(
+        (i) => i.closest("label")?.textContent.startsWith("New field name"));
+      if (!input) throw new Error("the field rename input is not open");
+      const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+      s.call(input, to);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, { to });
+  };
+  // the server lists fields name-ordered, so the panel under rename is rarely
+  // the first one: click inside THAT panel, never `.drawer .panel`
+  const applyFieldRename = (from) => until(() => page.evaluate(({ from }) => {
+    const panel = [...document.querySelectorAll(".drawer .panel")]
+      .find((p) => p.querySelector(".cell-main")?.textContent.trim() === from);
+    const b = panel
+      && [...panel.querySelectorAll("button")].find((x) => x.textContent.trim() === "Apply field rename");
+    if (b && !b.disabled) { b.click(); return true; }
+    return false;
+  }, { from }), `apply the field rename (${from})`);
+  // client guards: an invalid target surfaces the server's notice, and an
+  // UNCHANGED target neither calls the server nor re-seeds the form (typed
+  // notes must survive — a re-seed would also blank every sealed field)
+  await page.evaluate(() => {
+    const area = document.querySelector(".drawer textarea");
+    if (!area) throw new Error("notes textarea not found");
+    const s = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+    s.call(area, "unsaved note that must survive a no-op rename");
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await openFieldRename("TOKEN");
+  await fillFieldRename("token");
+  await applyFieldRename("TOKEN");
+  await until(() => page.evaluate(() =>
+    (document.querySelector(".drawer")?.textContent || "").includes("invalid field name")),
+    "the invalid-name notice");
+  ok((await panelNames()).includes("TOKEN"), "a lowercase field name is refused with a notice and leaves the field in place");
+  await fillFieldRename("TOKEN");
+  await applyFieldRename("TOKEN");
+  await until(async () => !(await hasRenameInput()), "the no-op rename to close its editor");
+  ok(
+    (await page.evaluate(() => document.querySelector(".drawer textarea")?.value || ""))
+      === "unsaved note that must survive a no-op rename"
+      && (await drawerRevision()) === probe.revision,
+    "an unchanged field name is a no-op: typed notes survive and the revision does not move",
+  );
+  // conflict branch: a sibling's name is refused, the field stays
+  await openFieldRename("TOKEN");
+  await fillFieldRename("REGION");
+  await applyFieldRename("TOKEN");
+  await until(() => page.evaluate(() =>
+    (document.querySelector(".drawer")?.textContent || "").includes("already exists")),
+    "the field rename conflict notice");
+  ok((await panelNames()).includes("TOKEN"), "a field rename onto a sibling name is refused and leaves the field in place");
+  // success branch: only the name moves
+  await fillFieldRename("ACCESS_KEY");
+  await applyFieldRename("TOKEN");
+  await until(async () => {
+    const names = await panelNames();
+    return names.includes("ACCESS_KEY") && !names.includes("TOKEN");
+  }, "the renamed field panel");
+  ok(true, "the drawer shows the field under its new name");
+  ok((await drawerRevision()) === probe.revision + 1, "the drawer's revision reflects the rename");
+  // the list behind the drawer refreshes too (revision column) — polled: that
+  // refresh is a second fetch which lands after the drawer re-renders
+  await until(() => page.evaluate(({ item, revision }) => {
+    const row = [...document.querySelectorAll("tbody tr")].find((r) => r.textContent.includes(item));
+    if (!row) return false;
+    const cells = [...row.querySelectorAll("td")];
+    return !!document.querySelector(".drawer") && cells.length >= 3
+      && cells[2].textContent.trim() === String(revision);
+  }, { item: ITEM, revision: probe.revision + 1 }),
+    "the list row to reflect the new revision while the drawer stays open");
+  ok(true, "the list row reflects the new revision while the drawer stays open");
+  const after = await page.evaluate(async ({ item, snapshotId }) => {
+    const got = await (await fetch(`/api/admin/items/${encodeURIComponent(item)}`, {
+      credentials: "same-origin",
+    })).json();
+    const hist = await (await fetch(`/api/admin/items/${encodeURIComponent(item)}/history`, {
+      credentials: "same-origin",
+    })).json();
+    const moved = hist.items.find((r) => r.id === snapshotId);
+    if (!moved) throw new Error("the probe snapshot vanished after the rename");
+    const revealed = await (await fetch(
+      `/api/admin/items/${encodeURIComponent(item)}/history/${snapshotId}/reveal`,
+      { credentials: "same-origin" },
+    )).json();
+    const audit = await (await fetch("/api/admin/audit?action=field.rename", {
+      credentials: "same-origin",
+    })).json();
+    // the audit feed is oldest-first: the row just written is the last one
+    const last = audit.items.at(-1);
+    return {
+      names: got.fields.map((f) => f.name),
+      masked: got.fields.some((f) => f.name === "ACCESS_KEY" && f.secret === true && !("value" in f)),
+      revision: got.revision,
+      movedName: moved.name,
+      snapshotValue: revealed.value,
+      auditRow: last ? { item: last.item_name, detail: last.detail } : null,
+    };
+  }, { item: ITEM, snapshotId: probe.snapshotId });
+  ok(
+    after.names.includes("ACCESS_KEY") && !after.names.includes("TOKEN") && after.masked,
+    `the server moved the field and still masks it (${JSON.stringify(after.names)})`,
+  );
+  ok(after.revision === probe.revision + 1, `the item revision bumped once (${after.revision})`);
+  ok(after.movedName === "ACCESS_KEY", `the field's history snapshot followed it (${after.movedName})`);
+  ok(after.snapshotValue === SECRET_VALUE, "the history snapshot still reveals its sealed value after the move");
+  ok(
+    !!after.auditRow && after.auditRow.item === ITEM
+      && after.auditRow.detail.field === "ACCESS_KEY" && after.auditRow.detail.from === "TOKEN",
+    `the rename is audited with both names (${JSON.stringify(after.auditRow)})`,
+  );
+  // the live sealed value survived: reveal through the drawer
+  await page.evaluate(() => {
+    const panel = [...document.querySelectorAll(".drawer .panel")]
+      .find((p) => p.querySelector(".cell-main")?.textContent.trim() === "ACCESS_KEY");
+    if (!panel) throw new Error("no ACCESS_KEY panel to reveal");
+    [...panel.querySelectorAll("button")].find((b) => /^Reveal$/.test(b.textContent.trim())).click();
+  });
+  await until(() => page.evaluate(({ next }) =>
+    document.querySelector('[data-testid="revealed-ACCESS_KEY"]')?.textContent.trim() === next,
+    { next: FIELD_NEXT }), "the revealed live value under the new name");
+  ok(true, "the live secret reveals under the new name — nothing was re-sealed");
+  // back again: the console drops the revealed plaintext keyed by the old name
+  await openFieldRename("ACCESS_KEY");
+  await fillFieldRename("TOKEN");
+  await applyFieldRename("ACCESS_KEY");
+  await until(async () => {
+    const names = await panelNames();
+    return names.includes("TOKEN") && !names.includes("ACCESS_KEY");
+  }, "the field renamed back");
+  ok(
+    await page.evaluate(() =>
+      !document.querySelector('[data-testid="revealed-ACCESS_KEY"]')
+      && !document.querySelector('[data-testid="revealed-TOKEN"]')
+      && !!document.querySelector(".drawer .panel .secret")),
+    "a rename drops revealed plaintext from the drawer",
+  );
+  ok(!(await leaked(SECRET_VALUE)) && !(await leaked(FIELD_NEXT)), "no secret value leaked into the DOM after the renames");
+  // the audit filter offers the new action
+  await page.goto(`${BASE}/audit`);
+  await until(() => page.evaluate(() => !!document.querySelector(".filter-grid select")), "the audit filter");
+  ok(
+    await page.evaluate(() =>
+      [...document.querySelectorAll(".filter-grid select option")].some((o) => o.value === "field.rename")),
+    "the audit filter lists field.rename",
+  );
+}
+
 // 7. key mint: a header button opens the mint drawer (the console's modal
 // idiom); session only (rev 39); full-authority model (rev 38: label only)
 await page.goto(`${BASE}/keys`);

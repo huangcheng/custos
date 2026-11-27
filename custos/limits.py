@@ -53,6 +53,14 @@ def valid_item_name(name: object) -> str | None:
     return None
 
 
+def valid_field_name(name: object) -> str | None:
+    """Canonical field-name check (one source of truth for the write path and
+    the field-rename endpoint, rev 46): UPPER_SNAKE, 1..64 chars."""
+    if isinstance(name, str) and _FIELD_NAME_RE.match(name):
+        return name
+    return None
+
+
 def valid_username(name: object) -> str | None:
     """Operator username grammar: ASCII-only, even though item names now
     accept CJK (rev 45)."""
@@ -102,8 +110,7 @@ def _check_names(name: str | None, fields: list[dict[str, Any]]) -> None:
     if name is not None and not _ITEM_NAME_RE.match(name):
         raise _invalid("invalid item name")
     for entry in fields:
-        fname = entry.get("name")
-        if not isinstance(fname, str) or not _FIELD_NAME_RE.match(fname):
+        if valid_field_name(entry.get("name")) is None:
             raise _invalid("invalid field name")
         value = entry.get("value")
         if isinstance(value, str):

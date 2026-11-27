@@ -17,7 +17,7 @@ const ACTIONS = [
   "put",
   "patch",
   "delete",
-  "restore", "rename",
+  "restore", "rename", "field.rename",
   "purge",
   "force_drop",
   "history",

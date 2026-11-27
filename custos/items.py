@@ -16,7 +16,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -31,6 +31,7 @@ from custos.limits import (
     check_caps,
     plan_patch_ops,
     plan_put_ops,
+    valid_field_name,
     valid_item_name,
     validate_post_body,
 )
@@ -514,6 +515,60 @@ async def rename_item(
     await _audit_write(session, p, "rename", item, pre_revision, [],
                        extra_detail={"from": name})
     return {"name": new_name, "revision": item.revision}
+
+
+async def rename_field(
+    session: AsyncSession,
+    p: Principal,
+    name: str,
+    field_name: str,
+    new_name: str,
+) -> dict[str, Any]:
+    """Rename one field of a live item (§5, rev 46). Only the field's name
+    moves: the row and its sealed value stay (the ciphertext AAD binds the
+    field id, not the name, so nothing is re-encrypted), history rows follow
+    (they carry the name as a listing/budget label), and the item's revision
+    bumps so an edit drawer holding the old name fails its If-Match."""
+    if valid_field_name(new_name) is None:
+        raise AppError("invalid", "invalid field name")
+    item = await _lock_item(session, name)
+    if item is None or item.deleted_at is not None:
+        raise _not_found()
+    row = (
+        await session.execute(
+            select(Field).where(Field.item_id == item.id, Field.name == field_name)
+        )
+    ).scalars().first()
+    if row is None:
+        raise _not_found()
+    result = {"name": item.name, "revision": item.revision,
+              "field": {"name": field_name, "secret": row.secret}}
+    if new_name == field_name:
+        return result
+    clash = (
+        await session.execute(
+            select(Field.id).where(Field.item_id == item.id, Field.name == new_name)
+        )
+    ).first()
+    if clash is not None:
+        raise AppError("conflict", "a field with that name already exists on this item")
+    pre_revision = item.revision
+    row.name = new_name
+    item.revision += 1
+    try:
+        await session.flush()
+    except IntegrityError:
+        # a concurrent write claimed new_name between the check and the flush
+        raise AppError(
+            "conflict", "a field with that name already exists on this item"
+        ) from None
+    await session.execute(
+        update(FieldHistory).where(FieldHistory.field_id == row.id).values(name=new_name)
+    )
+    await _audit_write(session, p, "field.rename", item, pre_revision, [],
+                       extra_detail={"field": new_name, "from": field_name})
+    return {"name": item.name, "revision": item.revision,
+            "field": {"name": new_name, "secret": row.secret}}
 
 
 async def soft_delete(

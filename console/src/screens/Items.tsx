@@ -279,6 +279,7 @@ export function Items({ onSignOut }: { onSignOut: () => void }) {
             setOpen(name);
             void load(null);
           }}
+          onChanged={() => void load(null)}
           onSaved={() => {
             setOpen(null);
             void load(null);
@@ -294,11 +295,14 @@ function ItemDrawer({
   onClose,
   onSaved,
   onRenamed,
+  onChanged,
 }: {
   existing: string | null;
   onClose: () => void;
   onSaved: () => void;
   onRenamed?: (name: string) => void;
+  /** the item changed without closing the drawer (a field rename) */
+  onChanged?: () => void;
 }) {
   const [item, setItem] = useState<Item | null>(null);
   const [form, setForm] = useState<ItemForm>(emptyForm());
@@ -309,6 +313,9 @@ function ItemDrawer({
   const [revealError, setRevealError] = useState("");
   const [renaming, setRenaming] = useState(false);
   const [renameTo, setRenameTo] = useState("");
+  // rev 46: one saved field at a time can be renamed in place
+  const [fieldRename, setFieldRename] = useState<{ from: string; to: string } | null>(null);
+  const [fieldRenameBusy, setFieldRenameBusy] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [stepUpFor, setStepUpFor] = useState<null | ((token: string) => Promise<void>)>(null);
@@ -381,6 +388,9 @@ function ItemDrawer({
       setError("item has not loaded yet");
       return;
     }
+    // a field rename in flight bumps the revision under this drawer: a Save
+    // now would race it and come back as a 409 revision mismatch
+    if (fieldRenameBusy) return;
     setBusy(true);
     setError("");
     try {
@@ -506,6 +516,65 @@ function ItemDrawer({
     }
   };
 
+  const renameField = async (from: string) => {
+    if (!existing || !item) return;
+    const target = (fieldRename?.to ?? "").trim();
+    if (!target) {
+      setError("enter the new field name");
+      return;
+    }
+    if (target === from) {
+      // a no-op rename must not re-seed the form and drop unsaved edits
+      setFieldRename(null);
+      return;
+    }
+    setFieldRenameBusy(true);
+    setError("");
+    try {
+      await api(
+        "POST",
+        `/api/admin/items/${encodeURIComponent(existing)}/fields/${encodeURIComponent(from)}/rename`,
+        { name: target },
+      );
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "rename failed");
+      setFieldRenameBusy(false);
+      return;
+    }
+    // the rename committed; re-seed the form from the masked shape (unsaved
+    // edits are discarded, as the hint warns) and drop any revealed plaintext
+    // keyed by the old name. A failed refresh is reported as exactly that —
+    // the server has the new name, so the drawer must not keep pretending
+    // otherwise, and the list is refreshed regardless.
+    let fresh: Item;
+    try {
+      fresh = await api<Item>("GET", `/api/admin/items/${encodeURIComponent(existing)}`);
+    } catch (err) {
+      setFieldRename(null);
+      onChanged?.();
+      setError(
+        `field renamed, but refreshing the drawer failed (${
+          err instanceof ApiError ? err.message : "network"
+        }) — reopen the item`,
+      );
+      setFieldRenameBusy(false);
+      return;
+    }
+    setItem(fresh);
+    setForm(formFromItem(fresh));
+    setRevealed((prev) => {
+      const next = { ...prev };
+      delete next[from];
+      return next;
+    });
+    setHistory(null);
+    setSnapshot(null);
+    setHistoryCursor(null);
+    setFieldRename(null);
+    onChanged?.();
+    setFieldRenameBusy(false);
+  };
+
   const restore = () => {
     if (!existing) return;
     setStepUpFor(() => async (token: string) => {
@@ -556,7 +625,9 @@ function ItemDrawer({
             label="Save"
             variant="primary"
             onClick={() => void save()}
-            disabled={busy || (Boolean(existing) && (!item || item.name !== existing))}
+            disabled={
+              busy || fieldRenameBusy || (Boolean(existing) && (!item || item.name !== existing))
+            }
           />
         </>
       }
@@ -611,6 +682,19 @@ function ItemDrawer({
                 {field.secret ? "secret" : "plain"}
               </span>
               <span className="row-end" />
+              {/* rev 46: a saved field keeps its sealed value and history when
+                  renamed; an unsaved field is just edited in place above */}
+              {item && !item.deleted && item.fields.some((f) => f.name === field.name) ? (
+                <Button
+                  label="Rename field"
+                  variant="ghost"
+                  disabled={fieldRenameBusy}
+                  onClick={() => {
+                    setError("");
+                    setFieldRename({ from: field.name, to: field.name });
+                  }}
+                />
+              ) : null}
               <Button
                 label="Remove"
                 variant="ghost"
@@ -622,6 +706,31 @@ function ItemDrawer({
                 }
               />
             </div>
+            {fieldRename?.from === field.name ? (
+              <div className="stack">
+                <TextField
+                  label="New field name"
+                  value={fieldRename.to}
+                  onChange={(next) => setFieldRename({ from: field.name, to: next })}
+                  hint="UPPER_SNAKE, up to 64 characters — the stored value and history move with it; unsaved edits in other fields are discarded"
+                  autoFocus
+                />
+                <div className="row">
+                  <Button
+                    label="Apply field rename"
+                    variant="primary"
+                    disabled={fieldRenameBusy}
+                    onClick={() => void renameField(field.name)}
+                  />
+                  <Button
+                    label="Cancel"
+                    variant="ghost"
+                    disabled={fieldRenameBusy}
+                    onClick={() => setFieldRename(null)}
+                  />
+                </div>
+              </div>
+            ) : null}
             <label>
               <span className="label-text">Value</span>
               <input
