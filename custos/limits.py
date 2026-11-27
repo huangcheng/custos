@@ -14,14 +14,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from custos.errors import AppError
-from custos.names import ITEM_NAME_BODY, USERNAME_BODY
+from custos.names import ITEM_NAME_MAX, USERNAME_BODY, has_unprintable
 
 FIELD_VALUE_MAX = 16 * 1024  # raw UTF-8 bytes
 NOTES_MAX = 4 * 1024  # raw UTF-8 bytes
 FIELDS_MAX = 32
 ITEM_MAX = 256 * 1024  # canonical escaped JSON bytes
 
-_ITEM_NAME_RE = re.compile("^" + ITEM_NAME_BODY + r"\Z")
 _USERNAME_RE = re.compile("^" + USERNAME_BODY + r"\Z")
 _FIELD_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}\Z")
 
@@ -46,11 +45,30 @@ class Op:
 
 
 def valid_item_name(name: object) -> str | None:
-    """Canonical item-name check for audit attribution (one source of truth).
-    Han ideographs are valid (rev 45); usernames stay ASCII-only."""
-    if isinstance(name, str) and _ITEM_NAME_RE.match(name):
-        return name
-    return None
+    """Canonical item-name check (one source of truth; rev 48). The name is a
+    display label, not an identifier: the row's key is `items.id`, the name a
+    unique alias used in URLs. Rules: 1-200 characters, no surrounding
+    whitespace, printable only (newlines, tabs, zero-width/format characters
+    are rejected), no path separators (one URL segment). Case is significant —
+    "Google Map", "googlemap" and "谷歌地图" are distinct names."""
+    if not isinstance(name, str):
+        return None
+    if not 1 <= len(name) <= ITEM_NAME_MAX:
+        return None
+    if name != name.strip():
+        return None
+    if "/" in name or "\\" in name:
+        return None
+    if name in (".", ".."):
+        # dot segments are removed by URL normalisation (browsers, curl, the
+        # Rust url crate): such a row could never be addressed again, yet a
+        # soft-deleted name stays reserved — a permanently stuck row
+        return None
+    if has_unprintable(name):
+        # control/format/surrogate/private/unassigned and line separators;
+        # ordinary spaces (including NBSP and U+3000) are visible text
+        return None
+    return name
 
 
 def valid_field_name(name: object) -> str | None:
@@ -62,8 +80,8 @@ def valid_field_name(name: object) -> str | None:
 
 
 def valid_username(name: object) -> str | None:
-    """Operator username grammar: ASCII-only, even though item names now
-    accept CJK (rev 45)."""
+    """Operator username grammar: ASCII-only, even though item names are free
+    display labels (rev 48)."""
     if isinstance(name, str) and _USERNAME_RE.match(name):
         return name
     return None
@@ -107,7 +125,7 @@ def _check_text(value: str, label: str) -> None:
 
 
 def _check_names(name: str | None, fields: list[dict[str, Any]]) -> None:
-    if name is not None and not _ITEM_NAME_RE.match(name):
+    if name is not None and valid_item_name(name) is None:
         raise _invalid("invalid item name")
     for entry in fields:
         if valid_field_name(entry.get("name")) is None:

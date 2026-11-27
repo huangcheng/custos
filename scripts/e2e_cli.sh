@@ -195,9 +195,17 @@ docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
 check "a Chinese item name round-trips through URL encoding" 'grep -q "中文-密钥" "$RUN_DIR/get-cjk.log"'
 check "the Chinese notes round-trip too" 'grep -q "中文备注" "$RUN_DIR/get-cjk.log"'
 printf '%s' '[]' | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
-  custos --url http://127.0.0.1:8300 item set "密钥🚀" --notes "x" > "$RUN_DIR/set-cjk-bad.log" 2>&1 \
-  && fail "an out-of-grammar item name was accepted"
-check "an out-of-grammar name is still refused" 'grep -q "invalid item name" "$RUN_DIR/set-cjk-bad.log"'
+  custos --url http://127.0.0.1:8300 item set "密钥🚀" --notes "x" > "$RUN_DIR/set-cjk-emoji.log" 2>&1 \
+  || { cat "$RUN_DIR/set-cjk-emoji.log" >&2; fail "item set (emoji display label)"; }
+check "an emoji display label is accepted (rev 48)" 'grep -qE "^revision 1$" "$RUN_DIR/set-cjk-emoji.log"'
+docker exec -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+  custos --url http://127.0.0.1:8300 item get "密钥🚀" > "$RUN_DIR/get-cjk-emoji.log" 2>&1 \
+  || fail "item get (emoji display label)"
+check "an emoji name survives the client's percent-encoder and the server's decoding" 'grep -q "密钥🚀" "$RUN_DIR/get-cjk-emoji.log"'
+printf '%s' '[]' | docker exec -i -e XDG_CONFIG_HOME="$CLI_HOME" "$PROJECT-app-1" \
+  custos --url http://127.0.0.1:8300 item set "bad/name" --notes "x" > "$RUN_DIR/set-cjk-bad.log" 2>&1 \
+  && fail "an unaddressable item name (path separator) was accepted"
+check "an unaddressable name is still refused" 'grep -q "invalid item name" "$RUN_DIR/set-cjk-bad.log"'
 
 echo "== the exported value survives eval without executing"
 # The full §9 corpus, not just the quote shape: a newline, a CRLF and a

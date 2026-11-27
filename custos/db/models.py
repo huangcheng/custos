@@ -25,7 +25,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from custos.names import ITEM_NAME_PATTERN
+from custos.names import ITEM_NAME_CHECK
 
 FIELD_NAME_RE = r"^[A-Z][A-Z0-9_]{0,63}$"
 
@@ -44,7 +44,7 @@ def _created_at() -> Mapped[datetime]:
 
 class Item(Base):
     __tablename__ = "items"
-    __table_args__ = (CheckConstraint(f"name ~ '{ITEM_NAME_PATTERN}'", name="ck_items_name"),)
+    __table_args__ = (CheckConstraint(ITEM_NAME_CHECK, name="ck_items_name"),)
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)

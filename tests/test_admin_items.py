@@ -232,9 +232,10 @@ async def test_rename_item(admin_stack) -> None:
         r = await client.post("/api/admin/items/new-name/rename", headers=hdr,
                               json={"name": "other-name"})
         assert r.status_code == 409
-        # invalid grammar → 422
+        # structural rule (one URL segment) → 422; "NOT VALID" is a valid
+        # display label under rev 48 and must NOT be rejected
         r = await client.post("/api/admin/items/new-name/rename", headers=hdr,
-                              json={"name": "NOT VALID"})
+                              json={"name": "NOT/VALID"})
         assert r.status_code == 422 and r.json()["code"] == "invalid"
         # the move is audited with the previous name
         from sqlalchemy import select as _select
@@ -249,23 +250,30 @@ async def test_rename_item(admin_stack) -> None:
             assert row.detail.get("from") == "old-name"
 
 
-async def test_cjk_item_names_round_trip(admin_stack) -> None:
-    """rev 45: the app grammar and the DB CHECK both accept Han ideographs."""
+async def test_item_names_are_display_labels_round_trip(admin_stack) -> None:
+    """rev 48: names are display labels — spaces, uppercase and any script
+    round-trip through create, rename and the URL; the row key stays the id
+    and uniqueness is still exact (case-sensitive)."""
     async with admin_stack() as (client, maker, h):
         csrf = await h["login"](client)
         hdr = {"x-csrf-token": csrf}
-        r = await client.post("/api/admin/items", headers=hdr, json=body("密钥配置"))
-        assert r.status_code == 201, r.text
-        assert (await client.get("/api/admin/items/密钥配置")).status_code == 200
-        r = await client.post("/api/admin/items/密钥配置/rename", headers=hdr,
-                              json={"name": "阿里云-密钥"})
+        for name in ("Google Map", "googlemap", "谷歌地图"):
+            r = await client.post("/api/admin/items", headers=hdr, json=body(name))
+            assert r.status_code == 201, (name, r.text)
+        # uniqueness is exact: case and spacing are significant
+        r = await client.post("/api/admin/items", headers=hdr, json=body("Google Map"))
+        assert r.status_code == 409
+        for name in ("Google  Map", "google map"):
+            r = await client.post("/api/admin/items", headers=hdr, json=body(name))
+            assert r.status_code == 201, (name, r.text)
+        r = await client.post("/api/admin/items/Google Map/rename", headers=hdr,
+                              json={"name": "Google Maps"})
         assert r.status_code == 200, r.text
-        assert r.json()["name"] == "阿里云-密钥"
-        assert (await client.get("/api/admin/items/阿里云-密钥")).status_code == 200
-        # outside the grammar is still refused
-        for bad in ("BadName", "bad name", "密钥🚀"):
+        assert (await client.get("/api/admin/items/Google Maps")).status_code == 200
+        # structural rules still apply: one URL segment, trimmed, printable
+        for bad in ("x/y", "x\\y", " x", "x ", "x\ny", ""):
             r = await client.post("/api/admin/items", headers=hdr, json=body(bad))
-            assert r.status_code == 422, bad
+            assert r.status_code == 422, repr(bad)
 
 
 async def test_rename_field(admin_stack) -> None:

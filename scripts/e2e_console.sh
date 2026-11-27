@@ -786,6 +786,76 @@ ok(RESTORE === 200, `restore undeletes the item (status ${RESTORE})`);
     (document.querySelector(".drawer")?.textContent || "").includes("already exists")),
     "the conflict notice");
   ok(true, "renaming onto a taken name shows the conflict notice");
+  // rev 48: names are display labels — the DRAWER's rename path must accept
+  // uppercase + spaces (the console trims too), the old name must 404 (the row
+  // moved, not copied), case is significant, and the structural rules hold
+  const SPACED = "Google Map";
+  await page.goto(`${BASE}/items`);
+  await until(() => page.evaluate(({ item }) =>
+    [...document.querySelectorAll("tr")].some((r) => r.textContent.includes(item)),
+    { item: REN_NEW }), "the spaced-name probe row");
+  await page.evaluate(({ item }) => {
+    const row = [...document.querySelectorAll("tr")].find((r) => r.textContent.includes(item));
+    [...row.querySelectorAll("button")].find((b) => /^Open$/.test(b.textContent.trim())).click();
+  }, { item: REN_NEW });
+  await until(() => page.evaluate(() => !!document.querySelector(".drawer")), "the drawer");
+  await clickWhenReady("^Rename$", ".drawer", "the rename toggle");
+  await until(() => page.evaluate(() =>
+    [...document.querySelectorAll(".drawer input")].some(
+      (i) => i.closest("label")?.textContent.startsWith("New name"))), "the rename field");
+  await page.evaluate(({ name }) => {
+    const set = (el, v) => {
+      const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+      s.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const label = [...document.querySelectorAll(".drawer input")].find(
+      (i) => i.closest("label")?.textContent.startsWith("New name"));
+    // a trailing space must be trimmed by the client, not rejected by the server
+    set(label, ` ${name} `);
+  }, { name: SPACED });
+  await clickWhenReady("^Apply rename$", ".drawer", "apply the spaced rename");
+  // wait for the rename to land before probing: the click returns before the
+  // POST does, and an immediate fetch would read the pre-rename state
+  await until(() => page.evaluate(async ({ oldName, newName }) => {
+    const old = await fetch(`/api/admin/items/${encodeURIComponent(oldName)}`, { credentials: "same-origin" });
+    if (old.status !== 404) return false;
+    const fresh = await fetch(`/api/admin/items/${encodeURIComponent(newName)}`, { credentials: "same-origin" });
+    return fresh.status === 200;
+  }, { oldName: REN_NEW, newName: SPACED }), "the spaced rename to land");
+  const renamedSpaced = await page.evaluate(async ({ newName }) => {
+    const fresh = await fetch(`/api/admin/items/${encodeURIComponent(newName)}`, { credentials: "same-origin" });
+    return { status: fresh.status, name: fresh.status === 200 ? (await fresh.json()).name : null };
+  }, { newName: SPACED });
+  ok(
+    renamedSpaced.status === 200 && renamedSpaced.name === SPACED,
+    `the drawer renames to a spaced, capitalised name (trailing space trimmed) (${JSON.stringify(renamedSpaced)})`,
+  );
+  // case and whitespace are significant; unaddressable names are refused
+  const rules = await page.evaluate(async () => {
+    const token = (await (await fetch("/api/auth/status", { credentials: "same-origin" })).json()).csrf_token;
+    const post = async (name) => (await fetch("/api/admin/items", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json", "x-csrf-token": token },
+      body: JSON.stringify({ name, fields: [] }),
+    })).status;
+    return {
+      lower: await post("google map"),
+      slash: await post("Google/Map"),
+      pad: await post(" Google Map"),
+      dots: await post(".."),
+      long: await post("x".repeat(201)),
+    };
+  });
+  ok(
+    rules.lower === 201 && rules.slash === 422 && rules.pad === 422 && rules.dots === 422 && rules.long === 422,
+    `case is significant and structural rules hold (${JSON.stringify(rules)})`,
+  );
+  await page.goto(`${BASE}/items`);
+  await until(() => page.evaluate(({ item }) =>
+    [...document.querySelectorAll("tr")].some((r) => r.textContent.includes(item)),
+    { item: SPACED }), "the spaced row in the list");
+  ok(true, "the list shows the spaced name verbatim");
 }
 
 // 6d. rename a field from the drawer (rev 46): the sealed value and the

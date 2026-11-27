@@ -19,6 +19,9 @@ import { MASK, stamp, truncate } from "../plain";
 import type { HistoryRow, HistorySnapshot, Item, ListRow, Page } from "../types";
 
 const PAGE = 50;
+// one copy for the create form and the rename panel (the grammar is shared)
+const NAME_HINT =
+  "any display label up to 200 characters — letters, digits, spaces, punctuation (no slashes or backslashes)";
 
 // The one purge request both entry points use, so the route cannot drift.
 async function purgeRequest(name: string): Promise<void> {
@@ -391,12 +394,19 @@ function ItemDrawer({
     // a field rename in flight bumps the revision under this drawer: a Save
     // now would race it and come back as a 409 revision mismatch
     if (fieldRenameBusy) return;
+    const name = form.name.trim();
+    if (!existing && !name) {
+      // a whitespace-only name would collapse to "" and cost a server round
+      // trip for the generic "invalid item name"
+      setError("enter a name for the item");
+      return;
+    }
     setBusy(true);
     setError("");
     try {
       const body = itemEditBody(form);
       if (!existing) {
-        await api("POST", "/api/admin/items", { name: form.name, ...body });
+        await api("POST", "/api/admin/items", { name, ...body });
       } else {
         await api("PUT", `/api/admin/items/${encodeURIComponent(existing)}`, body, {
           ifMatch: item ? String(item.revision) : undefined,
@@ -641,7 +651,7 @@ function ItemDrawer({
             label="New name"
             value={renameTo}
             onChange={setRenameTo}
-            hint="lowercase, digits, dot, dash, underscore, or Chinese characters — unsaved edits below are discarded"
+            hint={`${NAME_HINT} — unsaved edits below are discarded`}
             autoFocus
           />
           <div className="row">
@@ -660,7 +670,7 @@ function ItemDrawer({
           label="Name"
           value={form.name}
           onChange={(next) => setForm((prev) => ({ ...prev, name: next }))}
-          hint="lowercase, digits, dot, dash, underscore, or Chinese characters"
+          hint={NAME_HINT}
           autoFocus
         />
       ) : null}
